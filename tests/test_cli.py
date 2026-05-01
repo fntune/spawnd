@@ -1,13 +1,12 @@
 """Tests for CLI module."""
 
 import os
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
-from swarm.cli import main
-from swarm.storage.db import init_db, insert_agent, insert_plan, update_agent_status
+from spawnd.cli import main
+from spawnd.storage.db import init_db, insert_agent, insert_plan, update_agent_status
 
 
 @pytest.fixture
@@ -17,10 +16,10 @@ def runner():
 
 
 @pytest.fixture
-def temp_swarm_dir(tmp_path, monkeypatch):
-    """Create a temporary .swarm directory structure."""
-    swarm_dir = tmp_path / ".swarm" / "runs"
-    swarm_dir.mkdir(parents=True)
+def temp_spawnd_dir(tmp_path, monkeypatch):
+    """Create a temporary .spawnd runs directory."""
+    runs_dir = tmp_path / ".spawnd" / "runs"
+    runs_dir.mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -29,7 +28,7 @@ def test_main_help(runner):
     """Test main CLI help."""
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    assert "Claude Swarm" in result.output
+    assert "spawnd.dev" in result.output
 
 
 def test_run_requires_file_or_prompt(runner):
@@ -46,14 +45,14 @@ def test_resume_requires_run_id(runner):
     assert "--resume requires --run-id" in result.output
 
 
-def test_status_no_runs(runner, temp_swarm_dir):
+def test_status_no_runs(runner, temp_spawnd_dir):
     """Test status command with no runs."""
     result = runner.invoke(main, ["status"])
     assert result.exit_code != 0
     assert "No runs found" in result.output
 
 
-def test_status_with_run(runner, temp_swarm_dir):
+def test_status_with_run(runner, temp_spawnd_dir):
     """Test status command with existing run."""
     run_id = "test-run-1"
     db = init_db(run_id)
@@ -67,7 +66,7 @@ def test_status_with_run(runner, temp_swarm_dir):
     assert "agent1" in result.output
 
 
-def test_status_json_output(runner, temp_swarm_dir):
+def test_status_json_output(runner, temp_spawnd_dir):
     """Test status command JSON output."""
     run_id = "test-run-json"
     db = init_db(run_id)
@@ -82,26 +81,26 @@ def test_status_json_output(runner, temp_swarm_dir):
     assert '"status": "completed"' in result.output
 
 
-def test_status_nonexistent_run(runner, temp_swarm_dir):
+def test_status_nonexistent_run(runner, temp_spawnd_dir):
     """Test status command with nonexistent run."""
     result = runner.invoke(main, ["status", "nonexistent"])
     assert result.exit_code != 0
     assert "Run not found: nonexistent" in result.output
 
 
-def test_status_without_run_id_uses_latest_valid_run(runner, temp_swarm_dir):
+def test_status_without_run_id_uses_latest_valid_run(runner, temp_spawnd_dir):
     """Latest run selection should follow filesystem mtime, not name sorting."""
     older = "zzz-older"
     db = init_db(older)
     insert_plan(db, older, "older-plan", "name: older")
     db.close()
-    os.utime(temp_swarm_dir / ".swarm" / "runs" / older, (1, 1))
+    os.utime(temp_spawnd_dir / ".spawnd" / "runs" / older, (1, 1))
 
     newer = "aaa-newer"
     db = init_db(newer)
     insert_plan(db, newer, "newer-plan", "name: newer")
     db.close()
-    os.utime(temp_swarm_dir / ".swarm" / "runs" / newer, (2, 2))
+    os.utime(temp_spawnd_dir / ".spawnd" / "runs" / newer, (2, 2))
 
     result = runner.invoke(main, ["status"])
     assert result.exit_code == 0
@@ -109,47 +108,47 @@ def test_status_without_run_id_uses_latest_valid_run(runner, temp_swarm_dir):
     assert "Plan: newer-plan" in result.output
 
 
-def test_status_without_run_id_skips_invalid_runs(runner, temp_swarm_dir):
+def test_status_without_run_id_skips_invalid_runs(runner, temp_spawnd_dir):
     """Broken run directories should not crash the implicit latest-run path."""
-    bad_dir = temp_swarm_dir / ".swarm" / "runs" / "zzz-bad"
+    bad_dir = temp_spawnd_dir / ".spawnd" / "runs" / "zzz-bad"
     bad_dir.mkdir(parents=True)
-    (bad_dir / "swarm.db").write_text("")
+    (bad_dir / "spawnd.db").write_text("")
     os.utime(bad_dir, (2, 2))
 
     good = "aaa-good"
     db = init_db(good)
     insert_plan(db, good, "good-plan", "name: good")
     db.close()
-    os.utime(temp_swarm_dir / ".swarm" / "runs" / good, (1, 1))
+    os.utime(temp_spawnd_dir / ".spawnd" / "runs" / good, (1, 1))
 
     result = runner.invoke(main, ["status"])
     assert result.exit_code == 0
     assert "Run: aaa-good" in result.output
 
 
-def test_resume_command_rejects_stale_run_db(runner, temp_swarm_dir):
+def test_resume_command_rejects_stale_run_db(runner, temp_spawnd_dir):
     """resume should fail cleanly for empty or stale DB files."""
-    stale_dir = temp_swarm_dir / ".swarm" / "runs" / "stale-run"
+    stale_dir = temp_spawnd_dir / ".spawnd" / "runs" / "stale-run"
     stale_dir.mkdir(parents=True)
-    (stale_dir / "swarm.db").write_text("")
+    (stale_dir / "spawnd.db").write_text("")
 
     result = runner.invoke(main, ["resume", "stale-run"])
     assert result.exit_code != 0
     assert "Run not found: stale-run" in result.output
 
 
-def test_run_resume_rejects_stale_run_db(runner, temp_swarm_dir):
+def test_run_resume_rejects_stale_run_db(runner, temp_spawnd_dir):
     """run --resume should use the same stale-run guard as resume."""
-    stale_dir = temp_swarm_dir / ".swarm" / "runs" / "stale-run"
+    stale_dir = temp_spawnd_dir / ".spawnd" / "runs" / "stale-run"
     stale_dir.mkdir(parents=True)
-    (stale_dir / "swarm.db").write_text("")
+    (stale_dir / "spawnd.db").write_text("")
 
     result = runner.invoke(main, ["run", "--resume", "--run-id", "stale-run"])
     assert result.exit_code != 0
     assert "Run not found: stale-run" in result.output
 
 
-def test_cancel_command(runner, temp_swarm_dir):
+def test_cancel_command(runner, temp_spawnd_dir):
     """Test cancel command."""
     run_id = "test-cancel"
     db = init_db(run_id)
@@ -164,7 +163,7 @@ def test_cancel_command(runner, temp_swarm_dir):
     assert "Agents cancelled: 1" in result.output
 
 
-def test_cancel_command_marks_pending_and_blocked_agents_cancelled(runner, temp_swarm_dir):
+def test_cancel_command_marks_pending_and_blocked_agents_cancelled(runner, temp_spawnd_dir):
     """Cancelling a run should not leave pending/blocked agents behind."""
     run_id = "test-cancel-pending"
     db = init_db(run_id)
@@ -194,17 +193,17 @@ def test_cancel_command_marks_pending_and_blocked_agents_cancelled(runner, temp_
     }
 
 
-def test_cancel_nonexistent_run(runner, temp_swarm_dir):
+def test_cancel_nonexistent_run(runner, temp_spawnd_dir):
     """Test cancel command with nonexistent run."""
     result = runner.invoke(main, ["cancel", "nonexistent"])
     assert result.exit_code != 0
     assert "Run not found: nonexistent" in result.output
 
 
-def test_logs_list(runner, temp_swarm_dir):
+def test_logs_list(runner, temp_spawnd_dir):
     """Test logs command lists available logs."""
     run_id = "test-logs"
-    logs_dir = temp_swarm_dir / ".swarm" / "runs" / run_id / "logs"
+    logs_dir = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "logs"
     logs_dir.mkdir(parents=True)
     (logs_dir / "agent1.log").write_text("test log content")
 
@@ -213,10 +212,10 @@ def test_logs_list(runner, temp_swarm_dir):
     assert "agent1" in result.output
 
 
-def test_logs_agent(runner, temp_swarm_dir):
+def test_logs_agent(runner, temp_spawnd_dir):
     """Test logs command with specific agent."""
     run_id = "test-logs-agent"
-    logs_dir = temp_swarm_dir / ".swarm" / "runs" / run_id / "logs"
+    logs_dir = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "logs"
     logs_dir.mkdir(parents=True)
     (logs_dir / "agent1.log").write_text("line1\nline2\nline3")
 
@@ -225,12 +224,12 @@ def test_logs_agent(runner, temp_swarm_dir):
     assert "line1" in result.output
 
 
-def test_clean_specific_run(runner, temp_swarm_dir):
+def test_clean_specific_run(runner, temp_spawnd_dir):
     """Test clean command for specific run."""
     run_id = "test-clean"
-    run_dir = temp_swarm_dir / ".swarm" / "runs" / run_id
+    run_dir = temp_spawnd_dir / ".spawnd" / "runs" / run_id
     run_dir.mkdir(parents=True)
-    (run_dir / "swarm.db").write_text("test")
+    (run_dir / "spawnd.db").write_text("test")
 
     result = runner.invoke(main, ["clean", run_id])
     assert result.exit_code == 0
@@ -238,21 +237,21 @@ def test_clean_specific_run(runner, temp_swarm_dir):
     assert not run_dir.exists()
 
 
-def test_clean_nonexistent_run(runner, temp_swarm_dir):
+def test_clean_nonexistent_run(runner, temp_spawnd_dir):
     """Test clean command with nonexistent run."""
     result = runner.invoke(main, ["clean", "nonexistent"])
     assert result.exit_code == 0
     assert "Run not found" in result.output
 
 
-def test_clean_requires_arg(runner, temp_swarm_dir):
+def test_clean_requires_arg(runner, temp_spawnd_dir):
     """Test clean command requires run_id or --all."""
     result = runner.invoke(main, ["clean"])
     assert result.exit_code != 0
     assert "Provide a run_id or use --all" in result.output
 
 
-def test_db_list_runs(runner, temp_swarm_dir):
+def test_db_list_runs(runner, temp_spawnd_dir):
     """Test db command lists runs."""
     # Create some runs
     for i in range(3):
@@ -266,7 +265,7 @@ def test_db_list_runs(runner, temp_swarm_dir):
     assert "Available runs" in result.output
 
 
-def test_db_query(runner, temp_swarm_dir):
+def test_db_query(runner, temp_spawnd_dir):
     """Test db command with query."""
     run_id = "test-db-query"
     db = init_db(run_id)
@@ -302,7 +301,7 @@ def test_roles_nonexistent(runner):
     assert "Role not found" in result.output
 
 
-def test_merge_no_completed_agents(runner, temp_swarm_dir):
+def test_merge_no_completed_agents(runner, temp_spawnd_dir):
     """Test merge command with no completed agents."""
     run_id = "test-merge"
     db = init_db(run_id)
@@ -315,7 +314,7 @@ def test_merge_no_completed_agents(runner, temp_swarm_dir):
     assert "No completed agents to merge" in result.output
 
 
-def test_merge_dry_run(runner, temp_swarm_dir):
+def test_merge_dry_run(runner, temp_spawnd_dir):
     """Test merge command dry run."""
     run_id = "test-merge-dry"
     db = init_db(run_id)
@@ -330,18 +329,18 @@ def test_merge_dry_run(runner, temp_swarm_dir):
     assert "dry run" in result.output
 
 
-def test_merge_conflict_does_not_report_success(runner, temp_swarm_dir, monkeypatch):
+def test_merge_conflict_does_not_report_success(runner, temp_spawnd_dir, monkeypatch):
     """Test merge command stops on merge conflicts instead of reporting success."""
     run_id = "test-merge-conflict"
     db = init_db(run_id)
     insert_plan(db, run_id, "test-plan", "completed", "name: test")
     insert_agent(db, run_id, "agent1", "Test prompt")
     update_agent_status(db, run_id, "agent1", "completed")
-    db.execute("UPDATE agents SET branch = ? WHERE run_id = ? AND name = ?", ("swarm/test/agent1", run_id, "agent1"))
+    db.execute("UPDATE agents SET branch = ? WHERE run_id = ? AND name = ?", ("spawnd/test/agent1", run_id, "agent1"))
     db.commit()
     db.close()
 
-    monkeypatch.setattr("swarm.cli.merge_branch_to_current", lambda branch: False)
+    monkeypatch.setattr("spawnd.cli.merge_branch_to_current", lambda branch: False)
 
     result = runner.invoke(main, ["merge", run_id])
     assert result.exit_code != 0
@@ -349,15 +348,15 @@ def test_merge_conflict_does_not_report_success(runner, temp_swarm_dir, monkeypa
     assert "Merged successfully" not in result.output
 
 
-def test_clean_removes_git_worktrees_before_deleting_run(runner, temp_swarm_dir, monkeypatch):
+def test_clean_removes_git_worktrees_before_deleting_run(runner, temp_spawnd_dir, monkeypatch):
     """Test clean command unregisters git worktrees before deleting artifacts."""
     run_id = "test-clean-git"
-    run_dir = temp_swarm_dir / ".swarm" / "runs" / run_id
+    run_dir = temp_spawnd_dir / ".spawnd" / "runs" / run_id
     run_dir.mkdir(parents=True)
-    (run_dir / "swarm.db").write_text("test")
+    (run_dir / "spawnd.db").write_text("test")
 
     cleaned: list[str] = []
-    monkeypatch.setattr("swarm.cli.cleanup_run_worktrees", lambda rid: cleaned.append(rid))
+    monkeypatch.setattr("spawnd.cli.cleanup_run_worktrees", lambda rid: cleaned.append(rid))
 
     result = runner.invoke(main, ["clean", run_id])
     assert result.exit_code == 0

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from swarm.storage.db import (
+from spawnd.storage.db import (
     get_agent,
     get_agents,
     get_plan,
@@ -18,15 +18,15 @@ from swarm.storage.db import (
     update_agent_status,
     update_plan_status,
 )
-from swarm.models.specs import AgentSpec, CostBudget, DependencyContext, Orchestration, CircuitBreaker, PlanSpec
-from swarm.runtime.scheduler import Scheduler, SchedulerResult
+from spawnd.models.specs import AgentSpec, CostBudget, DependencyContext, Orchestration, CircuitBreaker, PlanSpec
+from spawnd.runtime.scheduler import Scheduler, SchedulerResult
 
 
 @pytest.fixture
-def temp_swarm_dir(tmp_path):
-    """Create a temporary .swarm directory structure."""
-    swarm_dir = tmp_path / ".swarm" / "runs"
-    swarm_dir.mkdir(parents=True)
+def temp_spawnd_dir(tmp_path):
+    """Create a temporary .spawnd runs directory."""
+    runs_dir = tmp_path / ".spawnd" / "runs"
+    runs_dir.mkdir(parents=True)
     return tmp_path
 
 
@@ -44,9 +44,9 @@ def create_test_plan(
     )
 
 
-def test_scheduler_init(temp_swarm_dir, monkeypatch):
+def test_scheduler_init(temp_spawnd_dir, monkeypatch):
     """Test scheduler initialization."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="test", prompt="Test task")]
     plan = create_test_plan(agents)
@@ -58,9 +58,9 @@ def test_scheduler_init(temp_swarm_dir, monkeypatch):
     assert scheduler.use_mock is True
 
 
-def test_scheduler_init_db(temp_swarm_dir, monkeypatch):
+def test_scheduler_init_db(temp_spawnd_dir, monkeypatch):
     """Test scheduler database initialization."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [
         AgentSpec(name="auth", prompt="Implement auth"),
@@ -89,9 +89,9 @@ def test_scheduler_init_db(temp_swarm_dir, monkeypatch):
     db.close()
 
 
-def test_build_result_success(temp_swarm_dir, monkeypatch):
+def test_build_result_success(temp_spawnd_dir, monkeypatch):
     """Test _build_result with all agents completed."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A")]
     plan = create_test_plan(agents)
@@ -115,9 +115,9 @@ def test_build_result_success(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_build_result_failure(temp_swarm_dir, monkeypatch):
+def test_build_result_failure(temp_spawnd_dir, monkeypatch):
     """Test _build_result with failed agent."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A")]
     plan = create_test_plan(agents)
@@ -141,9 +141,9 @@ def test_build_result_failure(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_failed_deps(temp_swarm_dir, monkeypatch):
+def test_check_failed_deps(temp_spawnd_dir, monkeypatch):
     """Test _check_failed_deps detection."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [
         AgentSpec(name="a", prompt="Task A"),
@@ -166,9 +166,9 @@ def test_check_failed_deps(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_external_cancellation_detection(temp_swarm_dir, monkeypatch):
+def test_external_cancellation_detection(temp_spawnd_dir, monkeypatch):
     """Test that scheduler detects external cancellation."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A")]
     plan = create_test_plan(agents)
@@ -186,9 +186,9 @@ def test_external_cancellation_detection(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_resume_only_resets_retryable_agents(temp_swarm_dir, monkeypatch):
+def test_resume_only_resets_retryable_agents(temp_spawnd_dir, monkeypatch):
     """Resume should not rerun agents that failed without retry policy."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [
         AgentSpec(name="retryable", prompt="Retry me", on_failure="retry", retry_count=2),
@@ -214,9 +214,9 @@ def test_resume_only_resets_retryable_agents(temp_swarm_dir, monkeypatch):
     resumed.db.close()
 
 
-def test_resume_requeues_paused_agents(temp_swarm_dir, monkeypatch):
+def test_resume_requeues_paused_agents(temp_spawnd_dir, monkeypatch):
     """Manual resume should restart agents paused by cost/circuit-breaker logic."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="paused_worker", prompt="Resume me")]
     plan = create_test_plan(agents)
@@ -238,9 +238,9 @@ def test_resume_requeues_paused_agents(temp_swarm_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_spawn_agent_propagates_agentspec_env(temp_swarm_dir, monkeypatch):
+async def test_spawn_agent_propagates_agentspec_env(temp_spawnd_dir, monkeypatch):
     """AgentSpec.env should survive persist-then-rehydrate into AgentConfig."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A", env={"MY_FLAG": "1", "TOKEN": "t"})]
     plan = create_test_plan(agents)
@@ -251,16 +251,16 @@ async def test_spawn_agent_propagates_agentspec_env(temp_swarm_dir, monkeypatch)
     agent_row = get_agent(scheduler.db, "test-run-env", "a")
     captured: dict = {}
 
-    monkeypatch.setattr("swarm.runtime.scheduler.create_worktree", lambda *a, **kw: Path("/tmp/worktree-env"))
-    monkeypatch.setattr("swarm.runtime.scheduler.update_agent_worktree", lambda *a, **kw: None)
-    monkeypatch.setattr("swarm.runtime.scheduler.load_shared_context", lambda *a, **kw: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", lambda *a, **kw: Path("/tmp/worktree-env"))
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *a, **kw: "")
 
     def fake_spawn_worker(config, use_mock=False):
         captured["env"] = config.env
         return "task"
 
-    monkeypatch.setattr("swarm.runtime.scheduler.spawn_worker", fake_spawn_worker)
-    monkeypatch.setattr("swarm.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", fake_spawn_worker)
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None)
 
     await scheduler._spawn_agent(agent_row)
 
@@ -270,9 +270,65 @@ async def test_spawn_agent_propagates_agentspec_env(temp_swarm_dir, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_spawn_agent_passes_dependency_path_filters(temp_swarm_dir, monkeypatch):
+async def test_scheduler_preserves_zero_valued_agent_overrides(temp_spawnd_dir, monkeypatch):
+    """Explicit zero overrides should not fall through to plan defaults."""
+    monkeypatch.chdir(temp_spawnd_dir)
+
+    plan = PlanSpec(
+        name="zero-overrides",
+        agents=[
+            AgentSpec(
+                name="a",
+                prompt="Task A",
+                on_failure="retry",
+                retry_count=0,
+                max_cost_usd=0.0,
+                max_iterations=0,
+            )
+        ],
+    )
+
+    scheduler = Scheduler(plan, run_id="test-run-zero-overrides", use_mock=True)
+    scheduler._init_db()
+
+    agent_row = get_agent(scheduler.db, "test-run-zero-overrides", "a")
+    assert agent_row["retry_count"] == 0
+    assert agent_row["max_cost_usd"] == 0.0
+    assert agent_row["max_iterations"] == 0
+
+    captured: dict = {}
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", lambda *a, **kw: Path("/tmp/worktree-zero"))
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *a, **kw: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None)
+
+    def fake_spawn_worker(config, use_mock=False):
+        captured["max_cost_usd"] = config.max_cost_usd
+        captured["max_iterations"] = config.max_iterations
+        return "task"
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", fake_spawn_worker)
+
+    await scheduler._spawn_agent(agent_row)
+
+    assert captured["max_cost_usd"] == 0.0
+    assert captured["max_iterations"] == 0
+
+    update_agent_status(scheduler.db, "test-run-zero-overrides", "a", "failed", "boom")
+    should_stop = await scheduler._handle_agent_failure("a", "boom")
+    agent_row = get_agent(scheduler.db, "test-run-zero-overrides", "a")
+
+    assert should_stop is False
+    assert agent_row["status"] == "failed"
+    assert agent_row["retry_attempt"] == 1
+
+    scheduler.db.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_passes_dependency_path_filters(temp_spawnd_dir, monkeypatch):
     """Dependency path filters should be passed into worktree setup."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [
         AgentSpec(name="base", prompt="Base task"),
@@ -292,16 +348,16 @@ async def test_spawn_agent_passes_dependency_path_filters(temp_swarm_dir, monkey
     agent_row = get_agent(scheduler.db, "test-run-path-filters", "child")
     called: dict = {}
 
-    monkeypatch.setattr("swarm.runtime.scheduler.create_worktree", lambda *args, **kwargs: Path("/tmp/child-worktree"))
-    monkeypatch.setattr("swarm.runtime.scheduler.update_agent_worktree", lambda *args, **kwargs: None)
-    monkeypatch.setattr("swarm.runtime.scheduler.load_shared_context", lambda *args, **kwargs: "")
-    monkeypatch.setattr("swarm.runtime.scheduler.spawn_worker", lambda *args, **kwargs: "task")
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", lambda *args, **kwargs: Path("/tmp/child-worktree"))
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *args, **kwargs: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", lambda *args, **kwargs: "task")
 
     def fake_setup(*args, **kwargs):
         called["include_paths"] = kwargs.get("include_paths")
         called["exclude_paths"] = kwargs.get("exclude_paths")
 
-    monkeypatch.setattr("swarm.runtime.scheduler.setup_worktree_with_deps", fake_setup)
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", fake_setup)
 
     await scheduler._spawn_agent(agent_row)
 
@@ -312,9 +368,9 @@ async def test_spawn_agent_passes_dependency_path_filters(temp_swarm_dir, monkey
 
 
 @pytest.mark.asyncio
-async def test_handle_cost_exceeded_warn(temp_swarm_dir, monkeypatch):
+async def test_handle_cost_exceeded_warn(temp_spawnd_dir, monkeypatch):
     """Test cost exceeded with warn action."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cost_budget = CostBudget(total_usd=1.0, on_exceed="warn")
     agents = [AgentSpec(name="a", prompt="Task A")]
@@ -335,9 +391,9 @@ async def test_handle_cost_exceeded_warn(temp_swarm_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retry_count_allows_configured_number_of_retries(temp_swarm_dir, monkeypatch):
+async def test_retry_count_allows_configured_number_of_retries(temp_spawnd_dir, monkeypatch):
     """retry_count=1 should allow one retry before exhausting."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A", on_failure="retry", retry_count=1)]
     plan = create_test_plan(agents)
@@ -357,9 +413,9 @@ async def test_retry_count_allows_configured_number_of_retries(temp_swarm_dir, m
 
 
 @pytest.mark.asyncio
-async def test_handle_cost_exceeded_cancel(temp_swarm_dir, monkeypatch):
+async def test_handle_cost_exceeded_cancel(temp_spawnd_dir, monkeypatch):
     """Test cost exceeded with cancel action."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cost_budget = CostBudget(total_usd=1.0, on_exceed="cancel")
     agents = [AgentSpec(name="a", prompt="Task A")]
@@ -380,9 +436,9 @@ async def test_handle_cost_exceeded_cancel(temp_swarm_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_cost_exceeded_pause(temp_swarm_dir, monkeypatch):
+async def test_handle_cost_exceeded_pause(temp_spawnd_dir, monkeypatch):
     """Test cost exceeded with pause action (default)."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cost_budget = CostBudget(total_usd=1.0, on_exceed="pause")
     agents = [AgentSpec(name="a", prompt="Task A")]
@@ -402,9 +458,9 @@ async def test_handle_cost_exceeded_pause(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_circuit_breaker_cancel_all(temp_swarm_dir, monkeypatch):
+def test_check_circuit_breaker_cancel_all(temp_spawnd_dir, monkeypatch):
     """Test circuit breaker with cancel_all action."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cb = CircuitBreaker(threshold=2, action="cancel_all")
     orchestration = Orchestration(circuit_breaker=cb)
@@ -424,9 +480,9 @@ def test_check_circuit_breaker_cancel_all(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_circuit_breaker_pause(temp_swarm_dir, monkeypatch):
+def test_check_circuit_breaker_pause(temp_spawnd_dir, monkeypatch):
     """Test circuit breaker with pause action."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cb = CircuitBreaker(threshold=2, action="pause")
     orchestration = Orchestration(circuit_breaker=cb)
@@ -446,9 +502,9 @@ def test_check_circuit_breaker_pause(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_circuit_breaker_notify_only(temp_swarm_dir, monkeypatch):
+def test_check_circuit_breaker_notify_only(temp_spawnd_dir, monkeypatch):
     """Test circuit breaker with notify_only action."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cb = CircuitBreaker(threshold=2, action="notify_only")
     orchestration = Orchestration(circuit_breaker=cb)
@@ -465,9 +521,9 @@ def test_check_circuit_breaker_notify_only(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_circuit_breaker_below_threshold(temp_swarm_dir, monkeypatch):
+def test_check_circuit_breaker_below_threshold(temp_spawnd_dir, monkeypatch):
     """Test circuit breaker below threshold."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     cb = CircuitBreaker(threshold=5, action="cancel_all")
     orchestration = Orchestration(circuit_breaker=cb)
@@ -484,9 +540,9 @@ def test_check_circuit_breaker_below_threshold(temp_swarm_dir, monkeypatch):
     scheduler.db.close()
 
 
-def test_check_stuck_uses_latest_event_identity_not_capped_count(temp_swarm_dir, monkeypatch):
+def test_check_stuck_uses_latest_event_identity_not_capped_count(temp_spawnd_dir, monkeypatch):
     """Fresh events with a stable capped count should not look stuck."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A")]
     plan = create_test_plan(agents)
@@ -498,7 +554,7 @@ def test_check_stuck_uses_latest_event_identity_not_capped_count(temp_swarm_dir,
     second = [{"id": f"b{i}", "agent": "a", "event_type": "progress", "data": "{}", "ts": "t"} for i in range(50)]
     events = iter([first, second])
 
-    monkeypatch.setattr("swarm.runtime.scheduler.get_recent_events", lambda *args, **kwargs: next(events))
+    monkeypatch.setattr("spawnd.runtime.scheduler.get_recent_events", lambda *args, **kwargs: next(events))
 
     assert scheduler._check_stuck() is False
     assert scheduler.idle_iterations == 0
@@ -510,9 +566,9 @@ def test_check_stuck_uses_latest_event_identity_not_capped_count(temp_swarm_dir,
 
 
 @pytest.mark.asyncio
-async def test_cost_exceeded_is_terminal_and_not_retried(temp_swarm_dir, monkeypatch):
+async def test_cost_exceeded_is_terminal_and_not_retried(temp_spawnd_dir, monkeypatch):
     """Per-agent max cost should be terminal, not retried via on_failure=retry."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     agents = [AgentSpec(name="a", prompt="Task A", on_failure="retry", retry_count=2)]
     plan = create_test_plan(agents)

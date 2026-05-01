@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**claude-swarm** — Multi-agent orchestration framework.
+**spawnd.dev** — Multi-agent orchestration framework.
 
 One scheduler, one SQLite state store, pluggable vendor runtimes. Executes agents in parallel git worktrees with DAG dependency resolution, retry logic, manager/worker hierarchies, and branch merging. Two frontends (CLI + Python API) share the same machinery.
 
@@ -18,7 +18,7 @@ pip install -e ".[openai]"        # + OpenAI Agents SDK (gpt-5 etc.)
 pip install -e ".[dev]"           # both SDKs + pytest
 
 # Type + tests
-pyright swarm/
+pyright spawnd/
 pytest tests/                     # unit suite; tests/sdklive/ is excluded
 pytest tests/test_scheduler.py -xvs                          # one file
 pytest tests/test_scheduler.py::test_scheduler_init -xvs     # one test
@@ -26,32 +26,32 @@ pytest tests/test_scheduler.py::test_scheduler_init -xvs     # one test
 # Run directly with `python tests/sdklive/<file>.py`, not via pytest.
 
 # CLI (10 commands)
-swarm run -f plan.yaml
-swarm run -p "auth: Impl auth"
-swarm run -p "a: s1" -p "b: s2" --sequential
-swarm run --run-id <id> -p "..."
-swarm run --resume --run-id <id>
-swarm run -p "t: true" --mock     # no SDK calls
+spawnd run -f plan.yaml
+spawnd run -p "auth: Impl auth"
+spawnd run -p "a: s1" -p "b: s2" --sequential
+spawnd run --run-id <id> -p "..."
+spawnd run --resume --run-id <id>
+spawnd run -p "t: true" --mock     # no SDK calls
 
-swarm resume <run_id>
-swarm status [run_id] [--json]
-swarm logs <run_id> -a <agent> [-f]
-swarm logs <run_id> --all
-swarm merge <run_id> [--dry-run]
-swarm cancel <run_id>
-swarm dashboard <run_id>
-swarm clean [run_id] [--all]
-swarm db <run_id> [query]
-swarm roles [name]
+spawnd resume <run_id>
+spawnd status [run_id] [--json]
+spawnd logs <run_id> -a <agent> [-f]
+spawnd logs <run_id> --all
+spawnd merge <run_id> [--dry-run]
+spawnd cancel <run_id>
+spawnd dashboard <run_id>
+spawnd clean [run_id] [--all]
+spawnd db <run_id> [query]
+spawnd roles [name]
 ```
 
 ## Python API
 
-The same scheduler is a library — runs started from Python land in the same `.swarm/runs/<run_id>/` and are inspectable via the CLI commands above.
+The same scheduler is a library — runs started from Python land in the same `.spawnd/runs/<run_id>/` and are inspectable via the CLI commands above.
 
 ```python
 import asyncio
-from swarm import run, pipeline, handoff, agent
+from spawnd import run, pipeline, handoff, agent
 
 # Full DAG run (optionally mixing runtimes per agent)
 asyncio.run(run([
@@ -74,7 +74,7 @@ asyncio.run(handoff(agent("impl", "build"), agent("audit", "review")))
 ## Architecture
 
 ```
-swarm/
+spawnd/
 ├── cli.py                   # Click CLI — 10 commands
 ├── api.py                   # Python API — run / pipeline / handoff / agent
 ├── roles.py                 # 7 built-in role templates
@@ -111,7 +111,7 @@ Pluggable vendor executors, selected per-agent via `runtime:` (defaults to `clau
 | `claude` | `claude-agent-sdk` (`[sdk]`) | `sonnet` | SDK-reported USD (`cost_source="sdk"`) |
 | `openai` | `openai-agents` (`[openai]`) | `gpt-5` | Estimated from tokens × price table (`cost_source="estimated"`) |
 
-Adapters self-register at `swarm.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so swarm works without the `[openai]` extra installed.
+Adapters self-register at `spawnd.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so spawnd works without the `[openai]` extra installed.
 
 Mixed-runtime plans work — dependencies and manager→worker spawn flow across vendors. Manager-spawned children inherit the parent's runtime + cost_source.
 
@@ -127,10 +127,10 @@ Mixed-runtime plans work — dependencies and manager→worker spawn flow across
 
 ## Coordination Tools
 
-Plain-`str` returns (no Claude content-block shape); Claude SDK wrapping happens only at `swarm/tools/factory.py`. OpenAI `@function_tool` wrappers in `factory_openai.py` use the same functions directly.
+Plain-`str` returns (no Claude content-block shape); Claude SDK wrapping happens only at `spawnd/tools/factory.py`. OpenAI `@function_tool` wrappers in `factory_openai.py` use the same functions directly.
 
-- Worker (`swarm/tools/worker.py`): `mark_complete`, `request_clarification`, `report_progress`, `report_blocker`
-- Manager (`swarm/tools/manager.py`): `spawn_worker`, `respond_to_clarification`, `cancel_worker`, `get_worker_status`, `get_pending_clarifications`, `mark_plan_complete`
+- Worker (`spawnd/tools/worker.py`): `mark_complete`, `request_clarification`, `report_progress`, `report_blocker`
+- Manager (`spawnd/tools/manager.py`): `spawn_worker`, `respond_to_clarification`, `cancel_worker`, `get_worker_status`, `get_pending_clarifications`, `mark_plan_complete`
 
 `request_clarification` and `report_blocker` block the worker until the manager responds. `parent` / `tree_path` identifiers flow through the closure, not `os.environ` — two concurrent agents in the same process don't clobber each other.
 
@@ -164,15 +164,15 @@ agents:
 ## File Layout
 
 ```
-.swarm/runs/{run_id}/
-├── swarm.db                     # SQLite WAL; idempotent migration on init_db
+.spawnd/runs/{run_id}/
+├── spawnd.db                     # SQLite WAL; idempotent migration on init_db
 ├── worktrees/{agent}/           # Git worktree per agent
 └── logs/{agent}.log             # Per-agent log file (tail -f compatible)
 ```
 
 ## SQLite Schema (agents table)
 
-Key columns: `name`, `status`, `type`, `runtime`, `parent`, `vendor_session_id`, `cost_usd`, `cost_source`, `retry_count`, `retry_attempt`, `env`, `max_subagents`, `depends_on`. `_migrate_agents()` at `swarm/storage/db.py` runs on every `init_db` — adds missing columns + renames `session_id` → `vendor_session_id` on legacy DBs.
+Key columns: `name`, `status`, `type`, `runtime`, `parent`, `vendor_session_id`, `cost_usd`, `cost_source`, `retry_count`, `retry_attempt`, `env`, `max_subagents`, `depends_on`. `_migrate_agents()` at `spawnd/storage/db.py` runs on every `init_db` — adds missing columns + renames `session_id` → `vendor_session_id` on legacy DBs.
 
 ## Dependencies
 
@@ -195,19 +195,19 @@ Key columns: `name`, `status`, `type`, `runtime`, `parent`, `vendor_session_id`,
 ### Database Access
 
 ```python
-from swarm.storage.db import get_db, get_agents
+from spawnd.storage.db import get_db, get_agents
 
 with get_db(run_id) as db:
     agents = get_agents(db, run_id)
 ```
 
-### Path Helpers (`swarm.storage.paths`)
+### Path Helpers (`spawnd.storage.paths`)
 
 `get_run_dir(run_id)`, `get_db_path(run_id)`, `get_logs_dir(run_id)`, `get_worktrees_dir(run_id)`, `ensure_log_file(run_id, agent_name)`.
 
 ### Adding a Runtime
 
-1. Subclass `swarm.runtime.executors.base.Executor`, set `runtime = "my-vendor"`, implement `async run(config, toolset) -> dict`.
+1. Subclass `spawnd.runtime.executors.base.Executor`, set `runtime = "my-vendor"`, implement `async run(config, toolset) -> dict`.
 2. Call `register(MyExecutor())` at module scope.
-3. Import the module from `swarm/runtime/executors/__init__.py` (guarded with `try/except ImportError` if the SDK is optional).
+3. Import the module from `spawnd/runtime/executors/__init__.py` (guarded with `try/except ImportError` if the SDK is optional).
 4. Agents using `runtime: my-vendor` now dispatch through your executor. Cost should be recorded with an appropriate `cost_source`.

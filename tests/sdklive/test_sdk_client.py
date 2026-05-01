@@ -112,7 +112,7 @@ async def test_env_and_cwd():
         # Create a test file
         test_file = os.path.join(tmpdir, "test.txt")
         with open(test_file, "w") as f:
-            f.write("SWARM_TEST_CONTENT")
+            f.write("SPAWND_TEST_CONTENT")
 
         async for message in query(
             prompt=f"Read the file test.txt and tell me its contents.",
@@ -125,7 +125,7 @@ async def test_env_and_cwd():
             )
         ):
             if hasattr(message, "result"):
-                has_content = "SWARM_TEST_CONTENT" in message.result
+                has_content = "SPAWND_TEST_CONTENT" in message.result
                 print(f"  CWD worked: {has_content}")
                 print(f"  Result: {message.result[:60]}...")
 

@@ -13,7 +13,7 @@ from claude_agent_sdk import (
 
 
 async def test_worker_tools():
-    """Test swarm worker coordination tools."""
+    """Test spawnd worker coordination tools."""
     print("\n=== Test: Worker Coordination Tools ===")
 
     state = {"completed": False, "progress": [], "check_passed": False}

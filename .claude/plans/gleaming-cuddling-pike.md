@@ -1,16 +1,16 @@
-# swarm multi-runtime refactor
+# spawnd multi-runtime refactor
 
 > **2026-04-19 update — partially superseded.**
 >
-> Phase 3 ("Live mode" as a reduced-feature runner with in-memory state, no DAG, no manager spawn) is **cancelled**. It has been replaced by a unified Python API (`swarm.run / pipeline / handoff / agent`) that always uses the same scheduler, worktrees, and SQLite state as the CLI. See `.claude/plans/lets-work-on-bringing-tender-zebra.md` for the cancellation rationale and the replacement design.
+> Phase 3 ("Live mode" as a reduced-feature runner with in-memory state, no DAG, no manager spawn) is **cancelled**. It has been replaced by a unified Python API (`spawnd.api.run / pipeline / handoff / agent`) that always uses the same scheduler, worktrees, and SQLite state as the CLI. See `.claude/plans/lets-work-on-bringing-tender-zebra.md` for the cancellation rationale and the replacement design.
 >
-> **Phases 1, 2, and 4 remain valid** and should be reframed as "one runner with pluggable vendor executors" rather than "batch mode internals." When implementing them, build on top of `swarm/api.py` (introduced in the parity work) so both CLI and Python callers get the new runtimes for free.
+> **Phases 1, 2, and 4 remain valid** and should be reframed as "one runner with pluggable vendor executors" rather than "batch mode internals." When implementing them, build on top of `spawnd/api.py` (introduced in the parity work) so both CLI and Python callers get the new runtimes for free.
 
 ## Context
 
-`~/dev/swarm` is a Python multi-agent orchestration framework. Today it runs on the Claude Agent SDK only. The user wants swarm to also run OpenAI Agents SDK workers as a first-class runtime, and to add a "live mode" for single-run agent handoffs (no YAML, no SQLite, no worktree ceremony).
+`~/dev/spawnd` is a Python multi-agent orchestration framework. Today it runs on the Claude Agent SDK only. The user wants spawnd to also run OpenAI Agents SDK workers as a first-class runtime, and to add a "live mode" for single-run agent handoffs (no YAML, no SQLite, no worktree ceremony).
 
-Why this matters now: the user's `.claude/skills/` directory already encodes cross-vendor workflows (`debt`, `audit-fix-loop`, `swarm-audit`) that orchestrate Claude + Codex (GPT-5) interactively inside Claude Code sessions. There is no way to run those patterns as batch swarm plans today. swarm is the right home — the orchestration graph, worktree isolation, SQLite resume, and circuit breaker are already there; the only thing missing is vendor neutrality in the execution layer.
+Why this matters now: the user's `.claude/skills/` directory already encodes cross-vendor workflows (`debt`, `audit-fix-loop`, `swarm-audit`) that orchestrate Claude + Codex (GPT-5) interactively inside Claude Code sessions. There is no way to run those patterns as batch spawnd plans today. spawnd is the right home — the orchestration graph, worktree isolation, SQLite resume, and circuit breaker are already there; the only thing missing is vendor neutrality in the execution layer.
 
 Exploration confirmed the coupling surface is narrower than expected: `runtime/executor.py`, `tools/factory.py`, ~4 lines in `models/specs.py`, `scheduler.py:_spawn_agent()`, and the `agents` table schema. Everything above the executor (CLI, parser, deps graph, scheduler poll loop, gitops, merge, db helpers) is already vendor-neutral. `tools/worker.py` and `tools/manager.py` have no Claude SDK imports — only their return shape happens to match Claude's content-block format.
 
@@ -19,7 +19,7 @@ A stress-test pass surfaced seven meaningful corrections to my initial plan — 
 ## Target architecture
 
 ```
-swarm/
+spawnd/
   runtime/
     executors/
       __init__.py       # registry: {runtime: Executor}
@@ -43,13 +43,13 @@ swarm/
     db.py               # schema migration: + runtime, + cost_source, rename session_id
   roles.py              # + tools field, + read_only
   core/
-    errors.py           # Phase 1: SwarmExecutorError
+    errors.py           # Phase 1: SpawndExecutorError
     budget.py           # Phase 4: shared budget + cost table
     tracing.py          # Phase 4: OTel unification
   bridge/
     as_tool.py          # Phase 3: agent-as-tool wrappers
     mcp.py              # Phase 4 (deferred): shared MCP tool pool
-  cli.py                # Phase 4: swarm report <run_id>
+  cli.py                # Phase 4: spawnd report <run_id>
   examples/
     cross_check.py      # Phase 3: generator-reviewer hello world
     debt.py             # Phase 3: debt skill port
@@ -61,7 +61,7 @@ swarm/
 
 ### Changes
 
-1. **`swarm/runtime/executors/base.py` (new)** — define:
+1. **`spawnd/runtime/executors/base.py` (new)** — define:
    - `Observer` protocol: `on_start(config)`, `on_iteration(iteration)`, `on_event(event_type, data)`, `on_cost(usd)`, `on_complete(status, error=None)`. All no-ops by default.
    - `DBObserver(run_id)` — writes to SQLite via existing `storage/db.py` helpers (`update_agent_status`, `insert_event`, `update_agent_iteration`, `update_agent_cost`). This is the batch-mode observer.
    - `NullObserver` — in-memory only. Used by live mode (Phase 3) and tests.
@@ -80,7 +80,7 @@ swarm/
      ```
    - `EXECUTOR_REGISTRY: dict[str, Executor]` and `register(executor)` / `get_executor(runtime)`.
 
-2. **`swarm/tools/toolset.py` (new)** — `Toolset` dataclass:
+2. **`spawnd/tools/toolset.py` (new)** — `Toolset` dataclass:
    ```python
    @dataclass
    class Toolset:
@@ -92,55 +92,55 @@ swarm/
    ```
    Construction lives in `scheduler.py` (batch) or in live-mode helpers (Phase 3). Manager vs worker is a toolset difference, not an executor difference.
 
-3. **`swarm/tools/worker.py` + `swarm/tools/manager.py` (refactor return type)** — change every coordination function to return `str` (or a small `ToolResult(text: str, success: bool = True)` dataclass — pick the simpler path, which is plain `str`). The Claude content-block wrapping happens *only* in `tools/factory.py` at the boundary. Rationale from the critique: OpenAI `@function_tool` serializes dict returns to JSON and the LLM has to unwrap `content[0].text` on every call — token waste and confusion. Keeping the content-block shape in worker/manager also locks us into Claude semantics. This is the most important change in Phase 1.
+3. **`spawnd/tools/worker.py` + `spawnd/tools/manager.py` (refactor return type)** — change every coordination function to return `str` (or a small `ToolResult(text: str, success: bool = True)` dataclass — pick the simpler path, which is plain `str`). The Claude content-block wrapping happens *only* in `tools/factory.py` at the boundary. Rationale from the critique: OpenAI `@function_tool` serializes dict returns to JSON and the LLM has to unwrap `content[0].text` on every call — token waste and confusion. Keeping the content-block shape in worker/manager also locks us into Claude semantics. This is the most important change in Phase 1.
 
-4. **`swarm/tools/worker.py:89` + `manager.py` env leak fix** — `tools/worker.py` currently reads `SWARM_PARENT_AGENT` / `SWARM_TREE_PATH` from `os.environ`. Today this works because in-process MCP runs in the parent Python process; once OpenAI agents run concurrently in the same process, `os.environ` will leak between them. Thread `parent` and `tree_path` through the tool closure in `factory.py` (and `factory_openai.py` in Phase 2) instead. Latent bug fix that unblocks concurrent multi-runtime execution.
+4. **`spawnd/tools/worker.py:89` + `manager.py` env leak fix** — `tools/worker.py` currently reads `SPAWND_PARENT_AGENT` / `SPAWND_TREE_PATH` from `os.environ`. Today this works because in-process MCP runs in the parent Python process; once OpenAI agents run concurrently in the same process, `os.environ` will leak between them. Thread `parent` and `tree_path` through the tool closure in `factory.py` (and `factory_openai.py` in Phase 2) instead. Latent bug fix that unblocks concurrent multi-runtime execution.
 
-5. **`swarm/runtime/executors/claude.py` (new)** — move existing `run_worker`/`run_manager` bodies here, collapse into a single `ClaudeExecutor.run(config, toolset, observer)`. Inside: build `ClaudeAgentOptions` from `toolset.code + ["mcp__swarm__" + t for t in toolset.coord]`, set `permission_mode="plan"` when `toolset.write_allowed=False`, pass `toolset.system_prompt`. Emit observer callbacks on each `AssistantMessage` / `ResultMessage`. Return `StepResult` instead of a loose dict.
+5. **`spawnd/runtime/executors/claude.py` (new)** — move existing `run_worker`/`run_manager` bodies here, collapse into a single `ClaudeExecutor.run(config, toolset, observer)`. Inside: build `ClaudeAgentOptions` from `toolset.code + ["mcp__spawnd__" + t for t in toolset.coord]`, set `permission_mode="plan"` when `toolset.write_allowed=False`, pass `toolset.system_prompt`. Emit observer callbacks on each `AssistantMessage` / `ResultMessage`. Return `StepResult` instead of a loose dict.
 
-6. **`swarm/runtime/executor.py` (thin dispatcher)** — keep the public functions `spawn_worker(config, use_mock)` and `spawn_manager(config)` so `scheduler.py` doesn't change. Internally they now:
+6. **`spawnd/runtime/executor.py` (thin dispatcher)** — keep the public functions `spawn_worker(config, use_mock)` and `spawn_manager(config)` so `scheduler.py` doesn't change. Internally they now:
    - Build a `Toolset` for the worker/manager shape
    - Look up `get_executor(config.runtime)` from the registry
    - Create a `DBObserver(config.run_id)`
    - Call `executor.run(config, toolset, observer)`
    - Wrap in `asyncio.create_task` (preserving the current scheduler contract)
 
-7. **`swarm/models/specs.py`** — add `runtime: Literal["claude","openai"] = "claude"` to both `Defaults` and `AgentSpec`. Loosen `model` from `Literal["sonnet","opus","haiku"]` to `str | None`. Add `output_schema: dict | None = None` to `AgentSpec` (maps to OpenAI `output_type` in Phase 2; documented as ignored by Claude executor for now). Add `tools: list[str] | None = None` to `AgentSpec` (role override).
+7. **`spawnd/models/specs.py`** — add `runtime: Literal["claude","openai"] = "claude"` to both `Defaults` and `AgentSpec`. Loosen `model` from `Literal["sonnet","opus","haiku"]` to `str | None`. Add `output_schema: dict | None = None` to `AgentSpec` (maps to OpenAI `output_type` in Phase 2; documented as ignored by Claude executor for now). Add `tools: list[str] | None = None` to `AgentSpec` (role override).
 
-8. **`swarm/models/specs.py` — default_model_for helper**:
+8. **`spawnd/models/specs.py` — default_model_for helper**:
    ```python
    def default_model_for(runtime: str) -> str:
        return {"claude": "sonnet", "openai": "gpt-5"}.get(runtime, "sonnet")
    ```
    Used by `tools/manager.py:spawn_worker` (currently hardcodes `"sonnet"`) and `scheduler.py:216` (same).
 
-9. **`swarm/roles.py`** — add `tools: list[str] | None = None` and `read_only: bool = False` fields to `RoleTemplate`. Set `reviewer` role's `read_only=True` (maps to `["Read","Grep","Glob"]` code tools, `write_allowed=False` in Toolset). Defer filling in other roles until Phase 2.
+9. **`spawnd/roles.py`** — add `tools: list[str] | None = None` and `read_only: bool = False` fields to `RoleTemplate`. Set `reviewer` role's `read_only=True` (maps to `["Read","Grep","Glob"]` code tools, `write_allowed=False` in Toolset). Defer filling in other roles until Phase 2.
 
-10. **`swarm/storage/db.py` schema migration** — add three columns to `agents` table:
+10. **`spawnd/storage/db.py` schema migration** — add three columns to `agents` table:
     - `runtime TEXT NOT NULL DEFAULT 'claude'`
     - `cost_source TEXT NOT NULL DEFAULT 'sdk'` — `"sdk"` for Claude (authoritative), `"estimated"` for OpenAI (computed from tokens in Phase 2). Avoids a later bug report.
     - Rename `session_id` → `vendor_session_id`. **Don't migrate twice.** Update `insert_agent`, `get_agent`, and callers.
     
-    Use an idempotent ALTER + `PRAGMA table_info` check so existing `.swarm/runs/*/swarm.db` files keep working.
+    Use an idempotent ALTER + `PRAGMA table_info` check so existing `.spawnd/runs/*/spawnd.db` (and legacy `swarm.db`) files keep working.
 
-11. **`swarm/core/errors.py` (new)** — `SwarmExecutorError(message: str, retryable: bool = False, cost_so_far: float = 0.0)`. Normalize at the executor boundary so scheduler retry logic doesn't special-case vendor exception types.
+11. **`spawnd/core/errors.py` (new)** — `SpawndExecutorError(message: str, retryable: bool = False, cost_so_far: float = 0.0)`. Normalize at the executor boundary so scheduler retry logic doesn't special-case vendor exception types.
 
-12. **`swarm/runtime/scheduler.py:_spawn_agent()`** — read `runtime` from agent row, pass into `AgentConfig`. Use `default_model_for(runtime)` instead of hardcoded `"sonnet"` on line 216.
+12. **`spawnd/runtime/scheduler.py:_spawn_agent()`** — read `runtime` from agent row, pass into `AgentConfig`. Use `default_model_for(runtime)` instead of hardcoded `"sonnet"` on line 216.
 
-13. **`swarm/runtime/executor.py:AgentConfig`** — add `runtime: str = "claude"` field.
+13. **`spawnd/runtime/executor.py:AgentConfig`** — add `runtime: str = "claude"` field.
 
 ### Critical files to read before editing
 
-- `/Users/sour4bh/dev/swarm/swarm/runtime/executor.py` — source of `run_worker`/`run_manager` duplication that collapses into one method
-- `/Users/sour4bh/dev/swarm/swarm/runtime/scheduler.py` — lines 162–227 (`_spawn_agent`) and line 216 (hardcoded model default)
-- `/Users/sour4bh/dev/swarm/swarm/tools/worker.py` — return shape refactor + line 89 env leak
-- `/Users/sour4bh/dev/swarm/swarm/tools/manager.py` — return shape refactor + model default on line 25
-- `/Users/sour4bh/dev/swarm/swarm/tools/factory.py` — wrapping boundary for Claude content-block format
-- `/Users/sour4bh/dev/swarm/swarm/storage/db.py` — `insert_agent`, `update_agent_*` helpers; schema around lines 27–55
-- `/Users/sour4bh/dev/swarm/swarm/models/specs.py` — lines 22, 96 for model Literal; field additions
-- `/Users/sour4bh/dev/swarm/swarm/roles.py` — `RoleTemplate` around lines 6–14
-- `/Users/sour4bh/dev/swarm/tests/test_executor.py` — line 151 default assertion (`config.model == "sonnet"`)
-- `/Users/sour4bh/dev/swarm/tests/test_roles.py` — lines 27, 42 role-model assertions
+- `/Users/sour4bh/dev/spawnd/runtime/executor.py` — source of `run_worker`/`run_manager` duplication that collapses into one method
+- `/Users/sour4bh/dev/spawnd/runtime/scheduler.py` — lines 162–227 (`_spawn_agent`) and line 216 (hardcoded model default)
+- `/Users/sour4bh/dev/spawnd/tools/worker.py` — return shape refactor + line 89 env leak
+- `/Users/sour4bh/dev/spawnd/tools/manager.py` — return shape refactor + model default on line 25
+- `/Users/sour4bh/dev/spawnd/tools/factory.py` — wrapping boundary for Claude content-block format
+- `/Users/sour4bh/dev/spawnd/storage/db.py` — `insert_agent`, `update_agent_*` helpers; schema around lines 27–55
+- `/Users/sour4bh/dev/spawnd/models/specs.py` — lines 22, 96 for model Literal; field additions
+- `/Users/sour4bh/dev/spawnd/roles.py` — `RoleTemplate` around lines 6–14
+- `/Users/sour4bh/dev/spawnd/tests/test_executor.py` — line 151 default assertion (`config.model == "sonnet"`)
+- `/Users/sour4bh/dev/spawnd/tests/test_roles.py` — lines 27, 42 role-model assertions
 
 ### Reused utilities
 
@@ -156,7 +156,7 @@ swarm/
 2. New test `tests/test_executor_registry.py`: construct `AgentConfig(runtime="claude", ...)`, call dispatch, assert the `ClaudeExecutor` instance was returned. Also test `runtime="openai"` raises `KeyError` (no OpenAI executor registered yet) — this is the contract gate for Phase 2.
 3. New test `tests/test_toolset.py`: assert `Toolset(write_allowed=False)` produces a code-tool list without `Write`/`Edit`/`Bash`, and that the Claude executor would set `permission_mode="plan"` for it (test via a mock observer, don't spawn a real client).
 4. Run existing `tests/sdklive/` smoke test against a real Claude API to confirm end-to-end batch execution still works. This is the gate before calling Phase 1 done.
-5. Run `swarm run -f tests/fixtures/simple-plan.yaml --mock` to confirm the CLI path still works.
+5. Run `spawnd run -f tests/fixtures/simple-plan.yaml --mock` to confirm the CLI path still works.
 
 ### Exit criteria
 
@@ -178,7 +178,7 @@ swarm/
 - `tools/factory_openai.py` — wraps the same `tools/worker.py` / `tools/manager.py` functions with `@function_tool` instead of `@tool`. Thread `parent` / `tree_path` through closures (Phase 1 fix makes this clean).
 - `tools/openai_code.py` — `@function_tool` parity with Claude's built-ins: `read_file`, `edit_file`, `run_shell` (with sandbox-aware timeout), `grep`, `glob`. Respects `toolset.write_allowed=False` by skipping write/shell tools at construction time.
 - `roles.py` — fill in `read_only`/`tools` for the other 6 roles (explorer = read-only, implementer = full, etc.)
-- `core/errors.py` — catch `openai_agents.AgentError` / Runner exceptions, normalize to `SwarmExecutorError`
+- `core/errors.py` — catch `openai_agents.AgentError` / Runner exceptions, normalize to `SpawndExecutorError`
 - New `tests/sdklive/test_sdk_openai.py` — smoke test with real OpenAI key
 - New `tests/test_mixed_runtime_plan.py` — a plan with one claude agent and one openai agent, `depends_on: [claude_one]`, `--mock` for CI + live under `sdklive/`
 - Cancellation test: spawn OpenAI worker, cancel mid-flight, verify no leaked tasks
@@ -202,7 +202,7 @@ swarm/
   ) -> list[StepResult]: ...
   async def handoff(from_step: AgentConfig, to_step: AgentConfig, **kwargs) -> StepResult: ...
   ```
-  - `workspace="worktree"` (default) allocates under `.swarm/live/<uuid>/` via existing `gitops/worktrees.py`; cleaned up unless `keep=True`
+  - `workspace="worktree"` (default) allocates under `.spawnd/live/<uuid>/` via existing `gitops/worktrees.py`; cleaned up unless `keep=True`
   - `workspace="cwd"` runs in `Path.cwd()` — fast, no isolation
   - `workspace="tempdir"` uses `tempfile.TemporaryDirectory()` — ephemeral, no git history
   - Live mode uses `NullObserver` — no SQLite
@@ -238,18 +238,18 @@ swarm/
 
 - `core/tracing.py` — shared `run_id` → OTel setup. Install OTel trace processor into OpenAI Agents SDK (`add_trace_processor`). Enable Claude Code OTel via `OTEL_*` env vars in `ClaudeExecutor.run`. Both vendors' spans land in one backend.
 - `core/budget.py` — promote the price table + budget enforcement out of `executors/openai.py`. Shared across executors.
-- `cli.py` — new `swarm report <run_id>` command. Emits the "swarm optimization report" format from the user's `swarm-audit` skill Phase 7: per-agent utilization table, domain balance, triage efficiency, pipeline throughput, bottleneck analysis, suggested next-run config. swarm already logs events to SQLite; this is a query + formatter.
+- `cli.py` — new `spawnd report <run_id>` command. Emits an optimization report format (per-agent utilization, bottlenecks, suggested next-run config). spawnd already logs events to SQLite; this is a query + formatter.
 - `bridge/mcp.py` — shared function registry → Claude in-process MCP server (via `create_sdk_mcp_server`) + OpenAI stdio MCP server (via `MCPServerStdio`). Promote only when ≥3 shared tools exist to justify the abstraction.
 
 ## Out of scope (flagged for later)
 
-- **Skill → plan YAML converter**: the user's skills are already structured multi-phase workflows. A future tool could ingest `SKILL.md` files and emit `PlanSpec` YAML. Makes swarm the runtime for the skill library. Phase 5+.
+- **Skill → plan YAML converter**: the user's skills are already structured multi-phase workflows. A future tool could ingest `SKILL.md` files and emit `PlanSpec` YAML. Makes spawnd the runtime for the skill library. Phase 5+.
 - **Durable pause/resume with external hooks** (inspired by `workflow` skill's `createHook`): evolve `request_clarification` into a durable pause-and-resume primitive. Phase 5+.
 - **Manager agents in live mode**: forbidden in Phase 3, revisit with a live micro-scheduler.
 
 ## Naming
 
-Keep `swarm`. The name is generic enough that adding OpenAI support reinforces it (OpenAI's original multi-agent project was also called Swarm). Update the README tagline from "Multi-agent orchestration for Claude Code" to "Multi-agent orchestration for coding agents (Claude + OpenAI)". No rename, no pyproject churn, no CLI break.
+Keep the **spawnd** / **spawnd.dev** naming; the CLI entrypoint is `spawnd`. README tagline can broaden to "multi-agent orchestration for coding agents (Claude + OpenAI)" when messaging needs it.
 
 ## Execution order
 

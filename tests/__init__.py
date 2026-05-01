@@ -1,1 +1,1 @@
-"""Tests for claude-swarm."""
+"""Tests for spawnd.dev."""

@@ -2,8 +2,8 @@
 
 import pytest
 
-from swarm.runtime.executors import claude as _claude_executor_module  # noqa: F401
-from swarm.runtime.executors.base import (
+from spawnd.runtime.executors import claude as _claude_executor_module  # noqa: F401
+from spawnd.runtime.executors.base import (
     EXECUTOR_REGISTRY,
     Executor,
     ExecutorNotFound,

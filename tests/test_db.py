@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from swarm.storage.db import (
+from spawnd.storage.db import (
     get_agent,
     get_agents,
     get_pending_agents,
@@ -23,7 +23,7 @@ def tmp_run(tmp_path):
     """Create a temporary run with initialized DB."""
     run_id = "test-run"
     # Override the base path by setting up in tmp_path
-    base = tmp_path / ".swarm" / "runs" / run_id
+    base = tmp_path / ".spawnd" / "runs" / run_id
     base.mkdir(parents=True)
 
     db = init_db(run_id, base_path=tmp_path)

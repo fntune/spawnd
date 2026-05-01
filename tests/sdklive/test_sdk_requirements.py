@@ -1,6 +1,6 @@
 """Validate all PLAN.md requirements against Claude Agent SDK.
 
-Tests every feature needed for claude-swarm implementation.
+Tests every feature needed for spawnd.dev implementation.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from claude_agent_sdk import (
 
 
 # ============================================================================
-# Simulated swarm database
+# Simulated spawnd database
 # ============================================================================
 
 DB = {
@@ -46,8 +46,8 @@ def reset_db():
 @tool("mark_complete", "Signal task completion. Runs check command.", {"summary": str})
 async def mark_complete(args: dict) -> dict:
     """Worker signals completion - runs check gate."""
-    agent = os.environ.get("SWARM_AGENT_NAME", "unknown")
-    run_id = os.environ.get("SWARM_RUN_ID", "test")
+    agent = os.environ.get("SPAWND_AGENT_NAME", "unknown")
+    run_id = os.environ.get("SPAWND_RUN_ID", "test")
 
     # Simulate check command
     check_passed = True  # Would run subprocess in real impl
@@ -64,7 +64,7 @@ async def mark_complete(args: dict) -> dict:
       {"question": str, "escalate_to": str})
 async def request_clarification(args: dict) -> dict:
     """Blocking call - waits for manager response."""
-    agent = os.environ.get("SWARM_AGENT_NAME", "unknown")
+    agent = os.environ.get("SPAWND_AGENT_NAME", "unknown")
     clarification_id = f"clar_{len(DB['clarifications'])}"
 
     DB["clarifications"][clarification_id] = {
@@ -85,7 +85,7 @@ async def request_clarification(args: dict) -> dict:
 @tool("report_progress", "Report progress update.", {"status": str, "milestone": str})
 async def report_progress(args: dict) -> dict:
     """Non-blocking progress update."""
-    agent = os.environ.get("SWARM_AGENT_NAME", "unknown")
+    agent = os.environ.get("SPAWND_AGENT_NAME", "unknown")
 
     event = {"agent": agent, "type": "progress", "data": args["status"]}
     if args.get("milestone"):
@@ -98,7 +98,7 @@ async def report_progress(args: dict) -> dict:
 @tool("report_blocker", "Report blocking issue. BLOCKS until response.", {"issue": str})
 async def report_blocker(args: dict) -> dict:
     """Blocking call for blockers."""
-    agent = os.environ.get("SWARM_AGENT_NAME", "unknown")
+    agent = os.environ.get("SPAWND_AGENT_NAME", "unknown")
 
     DB["agents"][agent] = {"status": "blocked"}
     DB["events"].append({"agent": agent, "type": "blocker", "data": args["issue"]})
@@ -115,7 +115,7 @@ async def report_blocker(args: dict) -> dict:
 @tool("spawn_worker", "Creates SDK agent in worktree.", {"name": str, "prompt": str, "check": str})
 async def spawn_worker(args: dict) -> dict:
     """Spawn a new worker agent."""
-    manager = os.environ.get("SWARM_AGENT_NAME", "manager")
+    manager = os.environ.get("SPAWND_AGENT_NAME", "manager")
     worker_name = f"{manager}.{args['name']}"
 
     DB["agents"][worker_name] = {
@@ -171,7 +171,7 @@ async def get_pending_clarifications(args: dict) -> dict:
 @tool("mark_plan_complete", "Signal orchestration done.", {"summary": str})
 async def mark_plan_complete(args: dict) -> dict:
     """Manager signals plan complete."""
-    manager = os.environ.get("SWARM_AGENT_NAME", "manager")
+    manager = os.environ.get("SPAWND_AGENT_NAME", "manager")
     DB["agents"][manager] = {"status": "completed", "summary": args["summary"]}
     DB["events"].append({"agent": manager, "type": "plan_complete", "data": args["summary"]})
     return {"content": [{"type": "text", "text": "Plan marked complete."}]}
@@ -185,8 +185,8 @@ async def test_worker_toolset():
     """Test all worker coordination tools."""
     print("\n=== 1. Worker Toolset ===")
     reset_db()
-    os.environ["SWARM_AGENT_NAME"] = "auth"
-    os.environ["SWARM_RUN_ID"] = "test-run-1"
+    os.environ["SPAWND_AGENT_NAME"] = "auth"
+    os.environ["SPAWND_RUN_ID"] = "test-run-1"
 
     server = create_sdk_mcp_server("worker", "1.0.0", [
         mark_complete, request_clarification, report_progress, report_blocker
@@ -230,7 +230,7 @@ async def test_manager_toolset():
     """Test all manager coordination tools."""
     print("\n=== 2. Manager Toolset ===")
     reset_db()
-    os.environ["SWARM_AGENT_NAME"] = "architect"
+    os.environ["SPAWND_AGENT_NAME"] = "architect"
 
     server = create_sdk_mcp_server("manager", "1.0.0", [
         spawn_worker, respond_to_clarification, cancel_worker,
@@ -276,8 +276,8 @@ async def test_working_directory():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create test file
-        test_file = Path(tmpdir) / "swarm_test.txt"
-        test_file.write_text("SWARM_WORKTREE_TEST_CONTENT")
+        test_file = Path(tmpdir) / "spawnd_test.txt"
+        test_file.write_text("SPAWND_WORKTREE_TEST_CONTENT")
 
         options = ClaudeAgentOptions(
             cwd=tmpdir,
@@ -289,16 +289,16 @@ async def test_working_directory():
 
         found_content = False
         async with ClaudeSDKClient(options=options) as client:
-            await client.query("Read the file swarm_test.txt and tell me its contents")
+            await client.query("Read the file spawnd_test.txt and tell me its contents")
             async for message in client.receive_response():
                 # Check assistant messages for content
                 if isinstance(message, AssistantMessage):
                     for block in message.content or []:
-                        if isinstance(block, TextBlock) and "SWARM_WORKTREE_TEST_CONTENT" in block.text:
+                        if isinstance(block, TextBlock) and "SPAWND_WORKTREE_TEST_CONTENT" in block.text:
                             found_content = True
                 # Also check result
                 if isinstance(message, ResultMessage):
-                    if message.result and "SWARM_WORKTREE_TEST_CONTENT" in message.result:
+                    if message.result and "SPAWND_WORKTREE_TEST_CONTENT" in message.result:
                         found_content = True
                     break
 
@@ -441,14 +441,14 @@ async def test_environment_variables():
 
     @tool("capture_env", "Capture environment", {})
     async def capture_env(args: dict) -> dict:
-        captured_env["RUN_ID"] = os.environ.get("SWARM_RUN_ID")
-        captured_env["AGENT"] = os.environ.get("SWARM_AGENT_NAME")
-        captured_env["PARENT"] = os.environ.get("SWARM_PARENT_AGENT")
+        captured_env["RUN_ID"] = os.environ.get("SPAWND_RUN_ID")
+        captured_env["AGENT"] = os.environ.get("SPAWND_AGENT_NAME")
+        captured_env["PARENT"] = os.environ.get("SPAWND_PARENT_AGENT")
         return {"content": [{"type": "text", "text": f"Captured: {captured_env}"}]}
 
-    os.environ["SWARM_RUN_ID"] = "test-run-123"
-    os.environ["SWARM_AGENT_NAME"] = "test-agent"
-    os.environ["SWARM_PARENT_AGENT"] = "parent-agent"
+    os.environ["SPAWND_RUN_ID"] = "test-run-123"
+    os.environ["SPAWND_AGENT_NAME"] = "test-agent"
+    os.environ["SPAWND_PARENT_AGENT"] = "parent-agent"
 
     server = create_sdk_mcp_server("env", "1.0.0", [capture_env])
 

@@ -5,15 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from swarm.storage.db import get_agent, init_db, insert_agent, open_db, update_agent_status
-from swarm.runtime.executor import AgentConfig, build_manager_system_prompt, build_system_prompt, run_worker_mock
+from spawnd.storage.db import get_agent, init_db, insert_agent, open_db, update_agent_status
+from spawnd.runtime.executor import AgentConfig, build_manager_system_prompt, build_system_prompt, run_worker_mock
 
 
 @pytest.fixture
-def temp_swarm_dir(tmp_path):
-    """Create a temporary .swarm directory structure."""
-    swarm_dir = tmp_path / ".swarm" / "runs"
-    swarm_dir.mkdir(parents=True)
+def temp_spawnd_dir(tmp_path):
+    """Create a temporary .spawnd runs directory."""
+    runs_dir = tmp_path / ".spawnd" / "runs"
+    runs_dir.mkdir(parents=True)
     return tmp_path
 
 
@@ -99,9 +99,9 @@ def test_build_manager_system_prompt_includes_shared_context():
 
 
 @pytest.mark.asyncio
-async def test_run_worker_mock_success(temp_swarm_dir, monkeypatch):
+async def test_run_worker_mock_success(temp_spawnd_dir, monkeypatch):
     """Test mock worker with passing check."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     run_id = "test-run-mock-1"
     db = init_db(run_id)
@@ -109,7 +109,7 @@ async def test_run_worker_mock_success(temp_swarm_dir, monkeypatch):
     db.close()
 
     # Create worktree directory (mock)
-    worktree = temp_swarm_dir / ".swarm" / "runs" / run_id / "worktrees" / "test-agent"
+    worktree = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "worktrees" / "test-agent"
     worktree.mkdir(parents=True)
 
     config = AgentConfig(
@@ -133,9 +133,9 @@ async def test_run_worker_mock_success(temp_swarm_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_worker_mock_failure(temp_swarm_dir, monkeypatch):
+async def test_run_worker_mock_failure(temp_spawnd_dir, monkeypatch):
     """Test mock worker with failing check."""
-    monkeypatch.chdir(temp_swarm_dir)
+    monkeypatch.chdir(temp_spawnd_dir)
 
     run_id = "test-run-mock-2"
     db = init_db(run_id)
@@ -143,7 +143,7 @@ async def test_run_worker_mock_failure(temp_swarm_dir, monkeypatch):
     db.close()
 
     # Create worktree directory (mock)
-    worktree = temp_swarm_dir / ".swarm" / "runs" / run_id / "worktrees" / "test-agent"
+    worktree = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "worktrees" / "test-agent"
     worktree.mkdir(parents=True)
 
     config = AgentConfig(

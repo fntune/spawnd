@@ -1,4 +1,4 @@
-"""Test Claude Agent SDK integration for claude-swarm.
+"""Test Claude Agent SDK integration for spawnd.dev.
 
 This file validates that the SDK provides everything PLAN.md requires:
 1. query() for worker agents (streaming)
@@ -162,7 +162,7 @@ def test_create_mcp_server():
         return {"content": [{"type": "text", "text": "Done"}]}
 
     server = create_sdk_mcp_server(
-        name="swarm-coordination",
+        name="spawnd-coordination",
         version="1.0.0",
         tools=[mark_complete]
     )
@@ -319,7 +319,7 @@ def test_worker_tools_definition():
 
     # Create coordination server
     server = create_sdk_mcp_server(
-        name="swarm-coordination",
+        name="spawnd-coordination",
         version="1.0.0",
         tools=[mark_complete, request_clarification, report_progress, report_blocker]
     )
@@ -412,7 +412,7 @@ def test_manager_tools_definition():
         return {"content": [{"type": "text", "text": "Plan completed."}]}
 
     server = create_sdk_mcp_server(
-        name="swarm-manager",
+        name="spawnd-manager",
         version="1.0.0",
         tools=[
             spawn_worker,

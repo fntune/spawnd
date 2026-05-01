@@ -3,7 +3,7 @@
   "typeCheckingMode": "strict",
   "pythonPlatform": "All",
   "include": ["."],
-  "exclude": ["venv", ".venv", ".swarm"],
+  "exclude": ["venv", ".venv", ".spawnd", ".swarm"],
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
   "reportUnknownMemberType": false,

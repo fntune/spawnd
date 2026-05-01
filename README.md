@@ -1,14 +1,14 @@
-# swarm
+# spawnd.dev
 
 > Multi-agent orchestration for Claude Code. Parallel worktrees. Resumable runs.
 
 ```bash
-swarm run -f plan.yaml
-swarm dashboard <run-id>
-swarm merge <run-id>
+spawnd run -f plan.yaml
+spawnd dashboard <run-id>
+spawnd merge <run-id>
 ```
 
-Write a YAML plan. Swarm resolves dependencies, spawns agents in isolated git worktrees, tracks everything in SQLite, and merges branches when done. Crash mid-run? `swarm resume`.
+Write a YAML plan. Spawnd resolves dependencies, spawns agents in isolated git worktrees, tracks everything in SQLite, and merges branches when done. Crash mid-run? `spawnd resume`.
 
 ---
 
@@ -16,11 +16,11 @@ Write a YAML plan. Swarm resolves dependencies, spawns agents in isolated git wo
 
 Chaining Claude sessions by hand doesn't scale. Copy-pasting outputs between windows, manually rebasing branches, losing all context when a session dies — this is friction that shouldn't exist.
 
-Swarm treats multi-agent work as a **data structure**: a plan spec with named agents, dependency edges, and completion conditions. Every run is tracked, every branch is isolated, every failure is recoverable.
+Spawnd treats multi-agent work as a **data structure**: a plan spec with named agents, dependency edges, and completion conditions. Every run is tracked, every branch is isolated, every failure is recoverable.
 
-- **Declarative plans.** YAML specs with `depends_on` edges. Swarm resolves topological order and runs independent agents in parallel.
+- **Declarative plans.** YAML specs with `depends_on` edges. Spawnd resolves topological order and runs independent agents in parallel.
 - **Worktree isolation.** Each agent gets its own git worktree and branch. No file conflicts between parallel agents. Merge when done.
-- **Resume-first.** Every run is a SQLite record. `swarm resume <run-id>` re-enters from the last known state — agents that completed stay completed.
+- **Resume-first.** Every run is a SQLite record. `spawnd resume <run-id>` re-enters from the last known state — agents that completed stay completed.
 - **Failure modes.** Per-agent: `continue`, `stop`, or `retry` (with error context injected back into the retry prompt). Circuit breaker trips on threshold.
 - **Roles.** Seven built-in role templates (architect, implementer, tester, reviewer, debugger, refactorer, documenter) with specialized prompts and default completion checks.
 
@@ -70,20 +70,20 @@ agents:
 Run it:
 
 ```bash
-swarm run -f plan.yaml        # launch all agents
-swarm dashboard <run-id>      # live status
-swarm logs <run-id> -a test   # stream agent logs
-swarm merge <run-id>           # merge completed branches
+spawnd run -f plan.yaml        # launch all agents
+spawnd dashboard <run-id>      # live status
+spawnd logs <run-id> -a test   # stream agent logs
+spawnd merge <run-id>           # merge completed branches
 ```
 
 Or skip the file for quick tasks:
 
 ```bash
 # single agent
-swarm run -p "audit: Find all SQL injection risks in the codebase"
+spawnd run -p "audit: Find all SQL injection risks in the codebase"
 
 # sequential pipeline
-swarm run -p "find: List all deprecated API usages" \
+spawnd run -p "find: List all deprecated API usages" \
           -p "fix: Apply fixes from find's output" \
           --sequential
 ```
@@ -92,11 +92,11 @@ swarm run -p "find: List all deprecated API usages" \
 
 ## Python API
 
-The same scheduler is available as a library — no YAML required. Runs started from Python are indistinguishable from CLI runs: same `.swarm/runs/<run-id>/` directory, same SQLite state, inspectable via `swarm status`, `swarm logs`, `swarm merge`, `swarm resume`.
+The same scheduler is available as a library — no YAML required. Runs started from Python are indistinguishable from CLI runs: same `.spawnd/runs/<run-id>/` directory, same SQLite state, inspectable via `spawnd status`, `spawnd logs`, `spawnd merge`, `spawnd resume`.
 
 ```python
 import asyncio
-from swarm import run, pipeline, handoff, agent
+from spawnd import run, pipeline, handoff, agent
 
 # DAG with dependencies
 asyncio.run(run([
@@ -163,21 +163,21 @@ Agents with no `depends_on` run immediately in parallel. Agents with `depends_on
 
 | Command | Description |
 |---------|-------------|
-| `swarm run -f plan.yaml` | Execute a plan spec |
-| `swarm run -p "name: task"` | Inline single agent |
-| `swarm run ... --sequential` | Force sequential execution |
-| `swarm run ... --mock` | Dry run without API calls |
-| `swarm resume <run-id>` | Resume from last known state |
-| `swarm status [run-id]` | Run status (latest if no ID) |
-| `swarm dashboard <run-id>` | Live status view |
-| `swarm logs <run-id> -a <agent>` | Stream agent logs |
-| `swarm logs <run-id> --all` | All agent logs |
-| `swarm merge <run-id>` | Merge completed branches |
-| `swarm merge <run-id> --dry-run` | Preview merge |
-| `swarm cancel <run-id>` | Cancel running agents |
-| `swarm clean [run-id]` | Remove artifacts |
-| `swarm db <run-id> [query]` | Query run state in SQLite |
-| `swarm roles [name]` | List / inspect roles |
+| `spawnd run -f plan.yaml` | Execute a plan spec |
+| `spawnd run -p "name: task"` | Inline single agent |
+| `spawnd run ... --sequential` | Force sequential execution |
+| `spawnd run ... --mock` | Dry run without API calls |
+| `spawnd resume <run-id>` | Resume from last known state |
+| `spawnd status [run-id]` | Run status (latest if no ID) |
+| `spawnd dashboard <run-id>` | Live status view |
+| `spawnd logs <run-id> -a <agent>` | Stream agent logs |
+| `spawnd logs <run-id> --all` | All agent logs |
+| `spawnd merge <run-id>` | Merge completed branches |
+| `spawnd merge <run-id> --dry-run` | Preview merge |
+| `spawnd cancel <run-id>` | Cancel running agents |
+| `spawnd clean [run-id]` | Remove artifacts |
+| `spawnd db <run-id> [query]` | Query run state in SQLite |
+| `spawnd roles [name]` | List / inspect roles |
 
 ---
 
@@ -187,7 +187,7 @@ Agents with no `depends_on` run immediately in parallel. Agents with `depends_on
 you write a plan spec
         │
         ▼
-swarm resolves dependency graph (topological sort)
+spawnd resolves dependency graph (topological sort)
         │
         ├─── independent agents → launch in parallel, each in its own worktree
         │
@@ -204,7 +204,7 @@ swarm resolves dependency graph (topological sort)
         failure: on_failure policy applies (continue/stop/retry)
                 │
                 ▼
-swarm merge: consolidate branches → resolve conflicts → done
+spawnd merge: consolidate branches → resolve conflicts → done
 ```
 
 Manager agents (type: manager) run with a direct API loop — full context control, can spawn subagents and read worker events before each turn. Worker agents run via the SDK Agent class for autonomous task execution.
@@ -214,7 +214,7 @@ Manager agents (type: manager) run with a direct API loop — full context contr
 ## Architecture
 
 ```
-swarm/
+spawnd/
 ├── cli.py          10 Click commands, entry point
 ├── models/         AgentSpec, PlanSpec, Defaults (Pydantic)
 ├── core/

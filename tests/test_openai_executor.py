@@ -13,13 +13,13 @@ pytest.importorskip("agents", reason="openai-agents SDK not installed")
 
 from types import SimpleNamespace
 
-from swarm.core.budget import estimate_cost_usd
-from swarm.runtime.executors.base import get_executor
-from swarm.runtime.executors.openai import OpenAIExecutor
-from swarm.runtime.executor import AgentConfig
-from swarm.storage.db import get_agent, init_db, insert_agent, insert_plan
-from swarm.tools.openai_code import build_code_tools
-from swarm.tools.toolset import worker_toolset
+from spawnd.core.budget import estimate_cost_usd
+from spawnd.runtime.executors.base import get_executor
+from spawnd.runtime.executors.openai import OpenAIExecutor
+from spawnd.runtime.executor import AgentConfig
+from spawnd.storage.db import get_agent, init_db, insert_agent, insert_plan
+from spawnd.tools.openai_code import build_code_tools
+from spawnd.tools.toolset import worker_toolset
 
 
 def test_openai_executor_registers():
@@ -71,7 +71,7 @@ def test_code_tools_bash_receives_explicit_env(tmp_path):
 
 
 def test_factory_openai_builds_coord_tools():
-    from swarm.tools.factory_openai import build_manager_coord_tools, build_worker_coord_tools
+    from spawnd.tools.factory_openai import build_manager_coord_tools, build_worker_coord_tools
 
     worker_tools = build_worker_coord_tools("run-x", "agent-a")
     worker_names = {t.name for t in worker_tools}
@@ -90,19 +90,19 @@ def test_factory_openai_builds_coord_tools():
 @pytest.mark.asyncio
 async def test_api_accepts_openai_runtime_on_agentspec(tmp_path, monkeypatch):
     """AgentSpec(runtime='openai') is accepted and persisted to the agents table."""
-    from swarm import agent, run
-    from swarm.storage.db import get_db
+    from spawnd import agent, run
+    from spawnd.storage.db import get_db
 
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".swarm" / "runs").mkdir(parents=True)
+    (tmp_path / ".spawnd" / "runs").mkdir(parents=True)
 
     def fake_create_worktree(run_id, agent_name, *args, **kwargs):
-        path = tmp_path / ".swarm" / "runs" / run_id / "worktrees" / agent_name
+        path = tmp_path / ".spawnd" / "runs" / run_id / "worktrees" / agent_name
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    monkeypatch.setattr("swarm.runtime.scheduler.create_worktree", fake_create_worktree)
-    monkeypatch.setattr("swarm.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", fake_create_worktree)
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None)
 
     # use_mock=True bypasses the vendor executor — we're only verifying that
     # runtime="openai" survives the YAML/AgentSpec → scheduler → DB path.
@@ -126,7 +126,7 @@ async def test_api_accepts_openai_runtime_on_agentspec(tmp_path, monkeypatch):
 async def test_openai_executor_passes_agent_env_to_bash(tmp_path, monkeypatch):
     """OpenAI runtime Bash tool should see the same agent env as Claude runtime."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".swarm" / "runs").mkdir(parents=True)
+    (tmp_path / ".spawnd" / "runs").mkdir(parents=True)
 
     run_id = "openai-env"
     db = init_db(run_id)
@@ -141,7 +141,7 @@ async def test_openai_executor_passes_agent_env_to_bash(tmp_path, monkeypatch):
         cost_source="estimated",
         env={"MY_FLAG": "set"},
     )
-    worktree = tmp_path / ".swarm" / "runs" / run_id / "worktrees" / "worker"
+    worktree = tmp_path / ".spawnd" / "runs" / run_id / "worktrees" / "worker"
     worktree.mkdir(parents=True)
     db.execute(
         "UPDATE agents SET worktree = ? WHERE run_id = ? AND name = ?",
@@ -167,8 +167,8 @@ async def test_openai_executor_passes_agent_env_to_bash(tmp_path, monkeypatch):
         await mark_complete.on_invoke_tool(None, json.dumps({"summary": "done"}))
         return SimpleNamespace(raw_responses=[], final_output=output)
 
-    monkeypatch.setattr("swarm.runtime.executors.openai.Agent", FakeAgent)
-    monkeypatch.setattr("swarm.runtime.executors.openai.Runner.run", fake_run)
+    monkeypatch.setattr("spawnd.runtime.executors.openai.Agent", FakeAgent)
+    monkeypatch.setattr("spawnd.runtime.executors.openai.Runner.run", fake_run)
 
     executor = OpenAIExecutor()
     result = await executor.run(

@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from swarm.gitops.worktrees import (
+from spawnd.gitops.worktrees import (
     create_worktree,
     get_current_branch,
     merge_branch,
@@ -96,7 +96,7 @@ def test_merge_branch_success(git_repo, monkeypatch):
     worktree2 = create_worktree("test-run", "target", git_repo)
 
     # Merge the feature branch into target worktree
-    result = merge_branch(worktree2, "swarm/test-run/feature", "Merge feature")
+    result = merge_branch(worktree2, "spawnd/test-run/feature", "Merge feature")
 
     assert result is True
     assert (worktree2 / "feature.txt").exists()
@@ -132,7 +132,7 @@ def test_run_git_command(git_repo):
 def test_cleanup_run_worktrees_does_not_touch_prefix_sibling(git_repo, monkeypatch):
     """cleanup_run_worktrees must not remove worktrees from a run whose id
     merely shares a prefix with the target run."""
-    from swarm.gitops.worktrees import cleanup_run_worktrees
+    from spawnd.gitops.worktrees import cleanup_run_worktrees
 
     monkeypatch.chdir(git_repo)
 
