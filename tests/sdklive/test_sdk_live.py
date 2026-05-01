@@ -94,7 +94,7 @@ async def test_custom_tool():
 
 
 async def test_coordination_tools():
-    """Test swarm-style coordination tools."""
+    """Test spawnd-style coordination tools."""
     print("\n=== Test: Coordination Tools ===")
 
     state = {"completed": False, "progress": []}

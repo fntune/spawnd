@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-**swarm** — Multi-agent orchestration for Claude Code.
+**spawnd.dev** — Multi-agent orchestration for Claude Code.
 
 One scheduler, one SQLite-backed state store, two frontends:
 
-- **CLI** (`swarm run -f plan.yaml` or `swarm run -p "name: prompt"`) — declarative YAML plans.
-- **Python API** (`from swarm import run, pipeline, handoff, agent`) — the same scheduler, invoked as a library.
+- **CLI** (`spawnd run -f plan.yaml` or `spawnd run -p "name: prompt"`) — declarative YAML plans.
+- **Python API** (`from spawnd import run, pipeline, handoff, agent`) — the same scheduler, invoked as a library.
 
-Both frontends share the same machinery: DAG dependencies, parallel execution in isolated git worktrees, retry with error-context injection, circuit breaker, manager-spawn hierarchies, blocking worker↔manager coordination, and resume. Runs started from either frontend land in the same `.swarm/runs/<run_id>/` directory and are inspectable via the same CLI commands.
+Both frontends share the same machinery: DAG dependencies, parallel execution in isolated git worktrees, retry with error-context injection, circuit breaker, manager-spawn hierarchies, blocking worker↔manager coordination, and resume. Runs started from either frontend land in the same `.spawnd/runs/<run_id>/` directory and are inspectable via the same CLI commands.
 
 ## Commands
 
@@ -18,7 +18,7 @@ Both frontends share the same machinery: DAG dependencies, parallel execution in
 pip install -e .
 pip install -e ".[sdk]"        # add Claude Agent SDK
 pip install -e ".[dev]"        # SDK + pytest + pytest-asyncio
-swarm --help
+spawnd --help
 
 # Testing
 pytest tests/                              # unit tests
@@ -28,35 +28,35 @@ pytest tests/test_scheduler.py::test_scheduler_init -xvs
 # run with `python tests/sdklive/test_sdk_live.py`, not pytest.
 
 # Type checking
-pyright swarm/
+pyright spawnd/
 
 # CLI
-swarm run -f plan.yaml                     # execute plan spec
-swarm run -p "auth: Impl auth"             # inline single agent
-swarm run -p "a: step1" -p "b: step2" --sequential
-swarm run --run-id <id> -p "..."           # explicit run ID
-swarm run --resume --run-id <id>           # resume existing run
-swarm run -p "test: noop" --mock           # dev-only: skip SDK calls
+spawnd run -f plan.yaml                     # execute plan spec
+spawnd run -p "auth: Impl auth"             # inline single agent
+spawnd run -p "a: step1" -p "b: step2" --sequential
+spawnd run --run-id <id> -p "..."           # explicit run ID
+spawnd run --resume --run-id <id>           # resume existing run
+spawnd run -p "test: noop" --mock           # dev-only: skip SDK calls
 
-swarm resume <run_id>                      # resume alias
-swarm status [run_id] [--json]             # view status (latest if no id)
-swarm logs <run_id> -a <agent>             # view agent logs
-swarm logs <run_id> --all                  # view all logs
-swarm merge <run_id> [--dry-run]           # merge completed branches
-swarm cancel <run_id>                      # cancel running agents
-swarm dashboard <run_id>                   # live status view
-swarm clean [run_id] [--all]               # clean up artifacts
-swarm db [run_id] [query]                  # query SQLite database
-swarm roles [name]                         # list/view built-in roles
+spawnd resume <run_id>                      # resume alias
+spawnd status [run_id] [--json]             # view status (latest if no id)
+spawnd logs <run_id> -a <agent>             # view agent logs
+spawnd logs <run_id> --all                  # view all logs
+spawnd merge <run_id> [--dry-run]           # merge completed branches
+spawnd cancel <run_id>                      # cancel running agents
+spawnd dashboard <run_id>                   # live status view
+spawnd clean [run_id] [--all]               # clean up artifacts
+spawnd db [run_id] [query]                  # query SQLite database
+spawnd roles [name]                         # list/view built-in roles
 ```
 
 ## Python API
 
-The library exposes the same scheduler the CLI drives. No parallel universe — a `swarm.run()` call produces a run indistinguishable from `swarm run -f plan.yaml`.
+The library exposes the same scheduler the CLI drives. No parallel universe — a `run()` call produces a run indistinguishable from `spawnd run -f plan.yaml`.
 
 ```python
 import asyncio
-from swarm import run, pipeline, handoff, agent
+from spawnd import run, pipeline, handoff, agent
 
 # Single-agent run
 await run([agent("auth", "Implement auth", check="pytest")], name="auth-run")
@@ -86,7 +86,7 @@ The `agent()` builder is a Python-friendly constructor for `AgentSpec` — omitt
 ## Architecture
 
 ```
-swarm/
+spawnd/
 ├── cli.py              # Click CLI — 10 commands
 ├── api.py              # Python API — run / pipeline / handoff / agent
 ├── core/
@@ -105,7 +105,7 @@ swarm/
 ├── storage/
 │   ├── db.py           # SQLite schema + helpers (WAL mode)
 │   ├── logs.py         # Per-agent log files, tail -f support
-│   └── paths.py        # .swarm/runs/<run_id>/ path helpers
+│   └── paths.py        # .spawnd/runs/<run_id>/ path helpers
 ├── tools/
 │   ├── factory.py      # @tool wrapping for Claude SDK MCP server
 │   ├── worker.py       # mark_complete, request_clarification, report_progress, report_blocker
@@ -128,7 +128,7 @@ tests/
 - **Parallel agents** in isolated git worktrees
 - **DAG dependencies** with topological ordering
 - **Sequential sugar** via `--sequential` CLI flag or `pipeline()` Python helper
-- **Resume** via `--resume --run-id` or `swarm resume` — completed agents stay completed
+- **Resume** via `--resume --run-id` or `spawnd resume` — completed agents stay completed
 
 ### Failure handling
 - **on_failure: continue** — default; continue with other agents
@@ -178,9 +178,9 @@ agents:
 ## File Layout
 
 ```
-.swarm/
+.spawnd/
 └── runs/{run_id}/
-    ├── swarm.db                # SQLite state (WAL mode)
+    ├── spawnd.db                # SQLite state (WAL mode)
     ├── worktrees/{agent}/      # Git worktrees (one per agent)
     └── logs/{agent}.log        # Per-agent log files (append-only)
 ```
@@ -203,20 +203,20 @@ agents:
 ### Database Access
 
 ```python
-from swarm.storage.db import get_db, get_agents, get_plan
+from spawnd.storage.db import get_db, get_agents, get_plan
 
 with get_db(run_id) as db:
     for agent in get_agents(db, run_id):
         print(agent["name"], agent["status"])
 ```
 
-Use `open_db()` for short-lived read-only access or `get_db()` as a context manager. Always call helpers from `swarm.storage.db` rather than raw SQL.
+Use `open_db()` for short-lived read-only access or `get_db()` as a context manager. Always call helpers from `spawnd.storage.db` rather than raw SQL.
 
 ### Path Helpers
 
-Centralized in `swarm/storage/paths.py`:
+Centralized in `spawnd/storage/paths.py`:
 
-- `get_run_dir(run_id)` — `.swarm/runs/<run_id>/`
+- `get_run_dir(run_id)` — `.spawnd/runs/<run_id>/`
 - `get_db_path(run_id)` — SQLite file
 - `get_worktrees_dir(run_id)` — worktree root
 - `get_logs_dir(run_id)` — logs root
@@ -224,13 +224,13 @@ Centralized in `swarm/storage/paths.py`:
 
 ### Coordination Tools
 
-Implementations live in `swarm/tools/worker.py` and `swarm/tools/manager.py`. They are wrapped as in-process MCP tools via `swarm/tools/factory.py` (`create_worker_tools`, `create_manager_tools`). Both worker and manager tools write directly to SQLite via `swarm.storage.db`; blocking tools (`request_clarification`, `report_blocker`) poll the `responses` table.
+Implementations live in `spawnd/tools/worker.py` and `spawnd/tools/manager.py`. They are wrapped as in-process MCP tools via `spawnd/tools/factory.py` (`create_worker_tools`, `create_manager_tools`). Both worker and manager tools write directly to SQLite via `spawnd.storage.db`; blocking tools (`request_clarification`, `report_blocker`) poll the `responses` table.
 
 ### Programmatic Runs
 
 ```python
 import asyncio
-from swarm import run, agent
+from spawnd import run, agent
 
 result = asyncio.run(run(
     [
@@ -243,4 +243,4 @@ result = asyncio.run(run(
 print(result.run_id, result.success, result.completed)
 ```
 
-After the call, `swarm status <result.run_id>` / `swarm logs <result.run_id>` / `swarm merge <result.run_id>` all work as if the run had been started from the CLI.
+After the call, `spawnd status <result.run_id>` / `spawnd logs <result.run_id>` / `spawnd merge <result.run_id>` all work as if the run had been started from the CLI.

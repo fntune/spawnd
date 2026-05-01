@@ -89,7 +89,7 @@ async def test_client_with_mcp():
 
 
 async def test_coordination_flow():
-    """Test swarm-style coordination with streaming input."""
+    """Test spawnd-style coordination with streaming input."""
     print("\n=== Test: Coordination Flow ===")
 
     state = {"completed": False, "progress": []}

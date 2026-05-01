@@ -3,10 +3,10 @@
 import pytest
 from pydantic import ValidationError
 
-from swarm.models.specs import AgentSpec, Defaults, PlanSpec
-from swarm.io.parser import parse_plan_file, parse_plan_yaml
-from swarm.io.plan_builder import create_inline_plan, infer_agent_name, load_shared_context, parse_inline_agents
-from swarm.io.validation import has_circular_deps, validate_plan
+from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
+from spawnd.io.parser import parse_plan_file, parse_plan_yaml
+from spawnd.io.plan_builder import create_inline_plan, infer_agent_name, load_shared_context, parse_inline_agents
+from spawnd.io.validation import has_circular_deps, validate_plan
 
 
 def test_parse_plan_yaml_minimal():
@@ -103,6 +103,17 @@ def test_validate_plan_circular_dep():
     errors = validate_plan(plan)
     assert len(errors) == 1
     assert "Circular" in errors[0]
+
+
+def test_validate_plan_unknown_role():
+    """Detect typos in use_role instead of silently dropping role behavior."""
+    plan = PlanSpec(
+        name="test",
+        agents=[AgentSpec(name="a", prompt="task", use_role="typo-role")],
+    )
+    errors = validate_plan(plan)
+    assert len(errors) == 1
+    assert "unknown role" in errors[0]
 
 
 def test_has_circular_deps():

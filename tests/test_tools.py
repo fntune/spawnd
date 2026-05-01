@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from swarm.storage.db import (
+from spawnd.storage.db import (
     get_agent,
     get_response,
     init_db,
@@ -13,8 +13,8 @@ from swarm.storage.db import (
     insert_plan,
     update_agent_status,
 )
-from swarm.tools.worker import mark_complete, report_progress
-from swarm.tools.manager import (
+from spawnd.tools.worker import mark_complete, report_progress
+from spawnd.tools.manager import (
     mark_plan_complete,
     respond_to_clarification,
     spawn_worker,
@@ -22,15 +22,15 @@ from swarm.tools.manager import (
 
 
 @pytest.fixture
-def temp_swarm_dir(tmp_path, monkeypatch):
-    """Create a temporary .swarm directory structure."""
-    swarm_dir = tmp_path / ".swarm" / "runs"
-    swarm_dir.mkdir(parents=True)
+def temp_spawnd_dir(tmp_path, monkeypatch):
+    """Create a temporary .spawnd runs directory."""
+    runs_dir = tmp_path / ".spawnd" / "runs"
+    runs_dir.mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
-def test_mark_complete_agent_not_found(temp_swarm_dir):
+def test_mark_complete_agent_not_found(temp_spawnd_dir):
     """Test mark_complete with non-existent agent."""
     run_id = "test-mark-complete-1"
     db = init_db(run_id)
@@ -43,13 +43,13 @@ def test_mark_complete_agent_not_found(temp_swarm_dir):
     assert "not found" in result
 
 
-def test_mark_complete_check_passes(temp_swarm_dir):
+def test_mark_complete_check_passes(temp_spawnd_dir):
     """Test mark_complete when check command passes."""
     run_id = "test-mark-complete-2"
     db = init_db(run_id)
     insert_plan(db, run_id, "test", "name: test", 25.0)
     insert_agent(db, run_id, "worker1", "Test task", check_command="true")
-    worktree = temp_swarm_dir / ".swarm" / "runs" / run_id / "worktrees" / "worker1"
+    worktree = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "worktrees" / "worker1"
     worktree.mkdir(parents=True)
     db.execute(
         "UPDATE agents SET worktree = ? WHERE run_id = ? AND name = ?",
@@ -68,13 +68,13 @@ def test_mark_complete_check_passes(temp_swarm_dir):
     assert agent["status"] == "completed"
 
 
-def test_mark_complete_check_fails(temp_swarm_dir):
+def test_mark_complete_check_fails(temp_spawnd_dir):
     """Test mark_complete when check command fails."""
     run_id = "test-mark-complete-3"
     db = init_db(run_id)
     insert_plan(db, run_id, "test", "name: test", 25.0)
     insert_agent(db, run_id, "worker1", "Test task", check_command="false")
-    worktree = temp_swarm_dir / ".swarm" / "runs" / run_id / "worktrees" / "worker1"
+    worktree = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "worktrees" / "worker1"
     worktree.mkdir(parents=True)
     db.execute(
         "UPDATE agents SET worktree = ? WHERE run_id = ? AND name = ?",
@@ -88,7 +88,7 @@ def test_mark_complete_check_fails(temp_swarm_dir):
     assert "Check failed" in result
 
 
-def test_report_progress(temp_swarm_dir):
+def test_report_progress(temp_spawnd_dir):
     """Test report_progress creates event."""
     run_id = "test-progress-1"
     db = init_db(run_id)
@@ -101,7 +101,7 @@ def test_report_progress(temp_swarm_dir):
     assert "Progress recorded" in result
 
 
-def test_spawn_worker_success(temp_swarm_dir):
+def test_spawn_worker_success(temp_spawnd_dir):
     """Test spawn_worker creates new agent."""
     run_id = "test-spawn-1"
     db = init_db(run_id)
@@ -121,7 +121,7 @@ def test_spawn_worker_success(temp_swarm_dir):
     assert agent["prompt"] == "Do something"
 
 
-def test_spawn_worker_already_exists(temp_swarm_dir):
+def test_spawn_worker_already_exists(temp_spawnd_dir):
     """Test spawn_worker fails if agent already exists."""
     run_id = "test-spawn-2"
     db = init_db(run_id)
@@ -135,7 +135,7 @@ def test_spawn_worker_already_exists(temp_swarm_dir):
     assert "already exists" in result
 
 
-def test_spawn_worker_rejects_invalid_name(temp_swarm_dir):
+def test_spawn_worker_rejects_invalid_name(temp_spawnd_dir):
     """Worker names should be validated before touching DB state."""
     run_id = "test-spawn-invalid"
     db = init_db(run_id)
@@ -153,9 +153,9 @@ def test_spawn_worker_rejects_invalid_name(temp_swarm_dir):
     assert agent is None
 
 
-def test_cancel_worker_cannot_cancel_unowned_agent(temp_swarm_dir):
+def test_cancel_worker_cannot_cancel_unowned_agent(temp_spawnd_dir):
     """Managers should only be able to cancel their own workers."""
-    from swarm.tools.manager import cancel_worker
+    from spawnd.tools.manager import cancel_worker
 
     run_id = "test-cancel-scope"
     db = init_db(run_id)
@@ -175,9 +175,9 @@ def test_cancel_worker_cannot_cancel_unowned_agent(temp_swarm_dir):
     assert agent["status"] == "running"
 
 
-def test_get_worker_status_cannot_read_unowned_agent(temp_swarm_dir):
+def test_get_worker_status_cannot_read_unowned_agent(temp_spawnd_dir):
     """Managers should not inspect unrelated agents."""
-    from swarm.tools.manager import get_worker_status
+    from spawnd.tools.manager import get_worker_status
 
     run_id = "test-status-scope"
     db = init_db(run_id)
@@ -190,7 +190,7 @@ def test_get_worker_status_cannot_read_unowned_agent(temp_swarm_dir):
     assert "Worker not found" in result
 
 
-def test_respond_to_clarification(temp_swarm_dir):
+def test_respond_to_clarification(temp_spawnd_dir):
     """Test respond_to_clarification creates response."""
     run_id = "test-respond-1"
     db = init_db(run_id)
@@ -211,7 +211,7 @@ def test_respond_to_clarification(temp_swarm_dir):
     assert response["response"] == "Use JWT"
 
 
-def test_respond_to_clarification_rejects_unowned_request(temp_swarm_dir):
+def test_respond_to_clarification_rejects_unowned_request(temp_spawnd_dir):
     """Managers should not respond to other managers' clarifications."""
     run_id = "test-respond-scope"
     db = init_db(run_id)
@@ -231,7 +231,7 @@ def test_respond_to_clarification_rejects_unowned_request(temp_swarm_dir):
     assert response is None
 
 
-def test_mark_plan_complete_workers_pending(temp_swarm_dir):
+def test_mark_plan_complete_workers_pending(temp_spawnd_dir):
     """Test mark_plan_complete fails if workers still running."""
     run_id = "test-plan-complete-1"
     db = init_db(run_id)
@@ -247,7 +247,7 @@ def test_mark_plan_complete_workers_pending(temp_swarm_dir):
     assert "still running" in result
 
 
-def test_mark_plan_complete_success(temp_swarm_dir):
+def test_mark_plan_complete_success(temp_spawnd_dir):
     """Test mark_plan_complete when all workers done."""
     run_id = "test-plan-complete-2"
     db = init_db(run_id)
@@ -267,10 +267,10 @@ def test_mark_plan_complete_success(temp_swarm_dir):
     assert agent["status"] == "completed"
 
 
-def test_cancel_worker_cancels_live_task(temp_swarm_dir):
+def test_cancel_worker_cancels_live_task(temp_spawnd_dir):
     """cancel_worker should cancel the registered asyncio task, not just flip status."""
-    from swarm.tools.manager import cancel_worker
-    from swarm.runtime import task_registry
+    from spawnd.tools.manager import cancel_worker
+    from spawnd.runtime import task_registry
 
     run_id = "test-cancel-live"
     db = init_db(run_id)
@@ -307,9 +307,9 @@ def test_cancel_worker_cancels_live_task(temp_swarm_dir):
     assert agent["status"] == "cancelled"
 
 
-def test_cancel_worker_preserves_other_terminal_states(temp_swarm_dir):
+def test_cancel_worker_preserves_other_terminal_states(temp_spawnd_dir):
     """cancel_worker must not overwrite timeout/cost terminal reasons."""
-    from swarm.tools.manager import cancel_worker
+    from spawnd.tools.manager import cancel_worker
 
     run_id = "test-cancel-terminal-state"
     db = init_db(run_id)
@@ -329,15 +329,15 @@ def test_cancel_worker_preserves_other_terminal_states(temp_swarm_dir):
     assert agent["status"] == "cost_exceeded"
 
 
-def test_mark_complete_refuses_cancelled_agent(temp_swarm_dir):
+def test_mark_complete_refuses_cancelled_agent(temp_spawnd_dir):
     """A cancelled agent must not be able to flip itself back to completed."""
-    from swarm.tools.worker import mark_complete as worker_mark_complete
+    from spawnd.tools.worker import mark_complete as worker_mark_complete
 
     run_id = "test-cancelled-mark-complete"
     db = init_db(run_id)
     insert_plan(db, run_id, "test", "name: test", 25.0)
     insert_agent(db, run_id, "worker1", "Test task", check_command="true")
-    worktree = temp_swarm_dir / ".swarm" / "runs" / run_id / "worktrees" / "worker1"
+    worktree = temp_spawnd_dir / ".spawnd" / "runs" / run_id / "worktrees" / "worker1"
     worktree.mkdir(parents=True)
     db.execute(
         "UPDATE agents SET worktree = ? WHERE run_id = ? AND name = ?",
@@ -359,7 +359,7 @@ def test_mark_complete_refuses_cancelled_agent(temp_swarm_dir):
     assert agent["status"] == "cancelled"
 
 
-def test_mark_plan_complete_accepts_cost_exceeded_workers(temp_swarm_dir):
+def test_mark_plan_complete_accepts_cost_exceeded_workers(temp_spawnd_dir):
     """Managers should be able to finish when only terminal cost failures remain."""
     run_id = "test-plan-complete-cost-terminal"
     db = init_db(run_id)
@@ -376,7 +376,7 @@ def test_mark_plan_complete_accepts_cost_exceeded_workers(temp_swarm_dir):
     assert "Failed workers: ['task1']" in text
 
 
-def test_spawn_worker_enforces_max_subagents(temp_swarm_dir):
+def test_spawn_worker_enforces_max_subagents(temp_spawnd_dir):
     """spawn_worker must reject further spawns once max_subagents is reached."""
     run_id = "test-max-subagents"
     db = init_db(run_id)
@@ -397,7 +397,7 @@ def test_spawn_worker_enforces_max_subagents(temp_swarm_dir):
     assert rejected is None
 
 
-def test_spawn_worker_allows_under_max_subagents(temp_swarm_dir):
+def test_spawn_worker_allows_under_max_subagents(temp_spawnd_dir):
     """spawn_worker still succeeds while under max_subagents."""
     run_id = "test-max-subagents-ok"
     db = init_db(run_id)
@@ -410,7 +410,7 @@ def test_spawn_worker_allows_under_max_subagents(temp_swarm_dir):
     assert "Spawned worker: manager.w2" in result
 
 
-def test_spawn_worker_inherits_manager_runtime_and_cost_source(temp_swarm_dir):
+def test_spawn_worker_inherits_manager_runtime_and_cost_source(temp_spawnd_dir):
     """Manager-spawned workers should stay on the manager's runtime."""
     run_id = "test-spawn-runtime-inherit"
     db = init_db(run_id)

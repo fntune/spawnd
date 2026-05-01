@@ -1,10 +1,10 @@
-# Claude Swarm - Revised DX Model & Agent Strategy
+# spawnd.dev - Revised DX Model & Agent Strategy
 
 ## Design Principles
 
 1. **CLI-first**: Rich CLI is the primary interface, designed for humans AND agents
 2. **Plan specs as input**: Agents write YAML specs, CLI executes them
-3. **Single slash command**: `/swarm` passes through to CLI (thin wrapper)
+3. **Single slash command**: `/spawnd` passes through to CLI (thin wrapper)
 4. **Dual execution model**: Managers run via manual loop (full context control), workers via SDK Agent class
 5. **Worktree isolation**: Every agent gets a worktree
 6. **Tool-based completion**: Agents signal completion via `mark_complete()` tool, not text markers
@@ -18,7 +18,7 @@
 | **type** | `worker` or `manager` - determines if agent can spawn subagents |
 | **use_role** | Optional specialized role template (architect, implementer, etc.) |
 | **worker** | Executes a single task, cannot spawn subagents |
-| **manager** | Can spawn subagents via `/swarm run`, receives worker events |
+| **manager** | Can spawn subagents via `/spawnd run`, receives worker events |
 | **role** | Predefined behavior template with system prompt, allowed tools, model |
 | **template** | Problem-type pattern (feature, bugfix) that expands to full plan spec |
 
@@ -70,27 +70,27 @@
 │           Any Agent (Claude Code, custom, etc.)       │
 │                                                       │
 │   1. Analyzes task                                    │
-│   2. Writes plan spec: .swarm/plans/feature.yaml     │
-│   3. Invokes: /swarm run feature.yaml                │
+│   2. Writes plan spec: .spawnd/plans/feature.yaml     │
+│   3. Invokes: /spawnd run feature.yaml                │
 └──────────────────────┬───────────────────────────────┘
                        │
                        ▼
               ┌─────────────────┐
-              │  /swarm <args>  │  ← Single slash command
+              │  /spawnd <args>  │  ← Single slash command
               │  (thin wrapper) │     passes through to CLI
               └────────┬────────┘
                        │
                        ▼
               ┌─────────────────────────────────────┐
-              │           swarm CLI                  │
+              │           spawnd CLI                  │
               │         (primary DX)                 │
               │                                      │
-              │  swarm run plan.yaml                 │
-              │  swarm status                        │
-              │  swarm logs auth -f                  │
-              │  swarm cancel auth                   │
-              │  swarm merge                         │
-              │  swarm dashboard                     │
+              │  spawnd run plan.yaml                 │
+              │  spawnd status                        │
+              │  spawnd logs auth -f                  │
+              │  spawnd cancel auth                   │
+              │  spawnd merge                         │
+              │  spawnd dashboard                     │
               └────────────────┬────────────────────┘
                                │
          ┌─────────────────────┴─────────────────────┐
@@ -110,7 +110,7 @@
           │                                       │
           └───────────────────────────────────────┘
                        │
-                        .swarm/runs/{run_id}/swarm.db
+                        .spawnd/runs/{run_id}/spawnd.db
 ```
 
 ## Agent Toolsets
@@ -288,7 +288,7 @@ while not done:
 Full schema with all options including orchestration:
 
 ```yaml
-# .swarm/plans/feature-auth.yaml
+# .spawnd/plans/feature-auth.yaml
 name: feature-auth                      # Required: plan identifier
 description: "Implement user auth"      # Optional: human description
 
@@ -410,11 +410,11 @@ on_complete: merge                      # merge | none | notify
 
 ### Run Identity & Resumability
 
-- `run.id` namespaces all state: `.swarm/runs/{run_id}/` (db, worktrees, logs, telemetry, plan snapshot).
+- `run.id` namespaces all state: `.spawnd/runs/{run_id}/` (db, worktrees, logs, telemetry, plan snapshot).
 - Managers can spawn new runs with fresh `run_id` values; context inheritance remains via branches and plan snapshots.
-- Branches are namespaced as `swarm/{run_id}/{agent}` to avoid collisions across runs.
-- Resume loads `.swarm/runs/{run_id}/plan.yaml`, reuses worktrees/branches, and skips already-completed agents.
-- CLI: `swarm run plan.yaml --run-id <id>` or `swarm run plan.yaml --resume --run-id <id>` (alias: `swarm resume <id>`).
+- Branches are namespaced as `spawnd/{run_id}/{agent}` to avoid collisions across runs.
+- Resume loads `.spawnd/runs/{run_id}/plan.yaml`, reuses worktrees/branches, and skips already-completed agents.
+- CLI: `spawnd run plan.yaml --run-id <id>` or `spawnd run plan.yaml --resume --run-id <id>` (alias: `spawnd resume <id>`).
 
 ### Manager Agent Plan Spec
 
@@ -436,12 +436,12 @@ agents:
       Process:
       1. Explore the codebase
       2. Break down into subtasks
-      3. Write a plan spec: .swarm/plans/architect-tasks.yaml (include run.id if resuming)
-      4. Spawn workers: /swarm run architect-tasks.yaml --run-id <id>
+      3. Write a plan spec: .spawnd/plans/architect-tasks.yaml (include run.id if resuming)
+      4. Spawn workers: /spawnd run architect-tasks.yaml --run-id <id>
       5. Monitor via events (injected into your context)
       6. Respond to stuck workers with guidance
       7. Review completed work
-      8. Merge: /swarm merge
+      8. Merge: /spawnd merge
       9. Call mark_plan_complete() when done
 
     # Manager settings
@@ -519,7 +519,7 @@ The agent must still have `type: manager` to actually spawn subagents.
 Predefined roles with tailored capabilities:
 
 ```yaml
-# Built-in roles (swarm/roles/*.yaml)
+# Built-in roles (spawnd/roles/*.yaml)
 roles:
   architect:
     description: "Decomposes problems, designs solutions"
@@ -705,7 +705,7 @@ phases:
 
 ```bash
 # Use built-in template
-swarm run --template feature "Implement user authentication"
+spawnd run --template feature "Implement user authentication"
 
 # Template expands to full plan spec
 # Architect analyzes task, spawns appropriate implementers
@@ -714,7 +714,7 @@ swarm run --template feature "Implement user authentication"
 ### Template-Based Plan Spec
 
 ```yaml
-# .swarm/plans/auth-feature.yaml
+# .spawnd/plans/auth-feature.yaml
 name: auth-feature
 template: feature                    # Use built-in template
 
@@ -752,8 +752,8 @@ agents:
       1. Identify components needed
       2. Choose appropriate roles for each
       3. Define dependencies
-      4. Write plan spec to .swarm/plans/generated.yaml
-      5. Execute: /swarm run generated.yaml
+      4. Write plan spec to .spawnd/plans/generated.yaml
+      5. Execute: /spawnd run generated.yaml
 
     # Architect has freedom to design the tree
     tree_generation:
@@ -767,20 +767,20 @@ agents:
 ```
 1. Agent 'auth' starts
    - Prompt includes: shared_context files (CLAUDE.md, docs/architecture.md)
-   - Works in: .swarm/runs/{run_id}/worktrees/auth/
-   - Commits to: swarm/{run_id}/auth branch
+   - Works in: .spawnd/runs/{run_id}/worktrees/auth/
+   - Commits to: spawnd/{run_id}/auth branch
 
 2. Agent 'cache' starts (parallel with auth)
    - Prompt includes: shared_context files
-   - Works in: .swarm/runs/{run_id}/worktrees/cache/
+   - Works in: .spawnd/runs/{run_id}/worktrees/cache/
 
 3. Agent 'integration' waits for deps to complete, then:
    - Worktree created from main
-   - swarm/{run_id}/auth branch MERGED into worktree (files on disk!)
-   - swarm/{run_id}/cache branch MERGED into worktree (files on disk!)
+   - spawnd/{run_id}/auth branch MERGED into worktree (files on disk!)
+   - spawnd/{run_id}/cache branch MERGED into worktree (files on disk!)
    - Prompt includes: shared_context files
    - Agent can import auth/cache code, run tests
-   - Works in: .swarm/runs/{run_id}/worktrees/integration/
+   - Works in: .spawnd/runs/{run_id}/worktrees/integration/
 ```
 
 **Key change:** Dependency code is merged into the worktree, not just injected as text.
@@ -792,62 +792,62 @@ This enables real imports, tests, and integration work.
 
 ```bash
 # Execute plan spec
-swarm run plan.yaml
-swarm run .swarm/plans/feature-auth.yaml
+spawnd run plan.yaml
+spawnd run .spawnd/plans/feature-auth.yaml
 
 # Explicit run id (namespaces all artifacts)
-swarm run plan.yaml --run-id 2024-03-19T12-30-45Z
+spawnd run plan.yaml --run-id 2024-03-19T12-30-45Z
 
 # Resume existing run
-swarm run plan.yaml --resume --run-id 2024-03-19T12-30-45Z
+spawnd run plan.yaml --resume --run-id 2024-03-19T12-30-45Z
 
 # Inline execution with -p flag
-swarm run -p "auth: Implement JWT auth" -p "cache: Implement cache"
+spawnd run -p "auth: Implement JWT auth" -p "cache: Implement cache"
 
 # Sequential pipeline (--seq)
-swarm run --seq -p "plan: Create implementation plan" \
+spawnd run --seq -p "plan: Create implementation plan" \
                 -p "impl: Execute the plan" \
                 -p "review: Review the code"
 
 # Pattern-based (one agent per file)
-swarm run --each "src/services/*.py" -p "Add type hints to {file}"
+spawnd run --each "src/services/*.py" -p "Add type hints to {file}"
 
 # Override defaults
-swarm run plan.yaml --max-iterations 50 --check "make test"
+spawnd run plan.yaml --max-iterations 50 --check "make test"
 ```
 
 ### Monitoring
 
 ```bash
-swarm status                 # Table if TTY, JSON if piped
-swarm status auth            # Single agent details
-swarm status --json          # Force JSON output
-swarm status --run-id <id>   # Inspect a specific run
-swarm logs auth              # View agent logs
-swarm logs auth -f           # Follow mode (tail -f)
-swarm logs auth --run-id <id>
-swarm logs --all             # Interleaved logs from all agents
-swarm dashboard              # TUI with live updates
-swarm dashboard --run-id <id>
+spawnd status                 # Table if TTY, JSON if piped
+spawnd status auth            # Single agent details
+spawnd status --json          # Force JSON output
+spawnd status --run-id <id>   # Inspect a specific run
+spawnd logs auth              # View agent logs
+spawnd logs auth -f           # Follow mode (tail -f)
+spawnd logs auth --run-id <id>
+spawnd logs --all             # Interleaved logs from all agents
+spawnd dashboard              # TUI with live updates
+spawnd dashboard --run-id <id>
 ```
 
 ### Control
 
 ```bash
-swarm cancel                 # Cancel all agents (latest run)
-swarm cancel --run-id <id>   # Cancel specific run
-swarm cancel auth cache      # Cancel specific agents
-swarm merge                  # Merge all completed branches (latest run)
-swarm merge --run-id <id>    # Merge specific run
-swarm merge auth cache       # Merge specific branches
-swarm resume <id>            # Resume run (alias for swarm run --resume --run-id)
-swarm resume <id> --agent auth  # Resume a specific agent within a run
-swarm clean                  # Remove stale worktrees, reset DB (latest run)
-swarm clean --run-id <id>    # Clean specific run
-swarm clean --all            # Full cleanup including logs/telemetry
-swarm db                     # Open interactive SQLite shell (latest run)
-swarm db --run-id <id>       # Open DB for specific run
-swarm db "SELECT * FROM agents WHERE run_id = '<id>'"  # Run SQL query
+spawnd cancel                 # Cancel all agents (latest run)
+spawnd cancel --run-id <id>   # Cancel specific run
+spawnd cancel auth cache      # Cancel specific agents
+spawnd merge                  # Merge all completed branches (latest run)
+spawnd merge --run-id <id>    # Merge specific run
+spawnd merge auth cache       # Merge specific branches
+spawnd resume <id>            # Resume run (alias for spawnd run --resume --run-id)
+spawnd resume <id> --agent auth  # Resume a specific agent within a run
+spawnd clean                  # Remove stale worktrees, reset DB (latest run)
+spawnd clean --run-id <id>    # Clean specific run
+spawnd clean --all            # Full cleanup including logs/telemetry
+spawnd db                     # Open interactive SQLite shell (latest run)
+spawnd db --run-id <id>       # Open DB for specific run
+spawnd db "SELECT * FROM agents WHERE run_id = '<id>'"  # Run SQL query
 ```
 
 ### Status Output Format
@@ -857,8 +857,8 @@ swarm db "SELECT * FROM agents WHERE run_id = '<id>'"  # Run SQL query
 ┌──────────────┬──────────┬──────┬────────────────┬─────────┐
 │ Agent        │ Status   │ Iter │ Branch         │ Check   │
 ├──────────────┼──────────┼──────┼────────────────┼─────────┤
-│ auth         │ ✓ done   │ 8/30 │ swarm/{run_id}/auth     │ ✓ pass  │
-│ cache        │ ● run    │ 3/30 │ swarm/{run_id}/cache    │ …       │
+│ auth         │ ✓ done   │ 8/30 │ spawnd/{run_id}/auth     │ ✓ pass  │
+│ cache        │ ● run    │ 3/30 │ spawnd/{run_id}/cache    │ …       │
 │ integration  │ ○ wait   │ 0/30 │ —              │ —       │
 └──────────────┴──────────┴──────┴────────────────┴─────────┘
 
@@ -877,12 +877,12 @@ swarm db "SELECT * FROM agents WHERE run_id = '<id>'"  # Run SQL query
 One slash command, passes through to CLI:
 
 ```bash
-/swarm run plan.yaml         # → swarm run plan.yaml
-/swarm status                # → swarm status
-/swarm logs auth -f          # → swarm logs auth -f
-/swarm cancel auth           # → swarm cancel auth
-/swarm merge                 # → swarm merge
-/swarm dashboard             # → swarm dashboard
+/spawnd run plan.yaml         # → spawnd run plan.yaml
+/spawnd status                # → spawnd status
+/spawnd logs auth -f          # → spawnd logs auth -f
+/spawnd cancel auth           # → spawnd cancel auth
+/spawnd merge                 # → spawnd merge
+/spawnd dashboard             # → spawnd dashboard
 ```
 
 This enables any agent (Claude Code, custom agents) to orchestrate full pipelines:
@@ -892,10 +892,10 @@ Agent thinking: "This feature needs auth, cache, and integration work.
 I'll write a plan spec and spawn parallel agents."
 
 Agent action:
-1. Write .swarm/plans/feature-auth.yaml
-2. Run: /swarm run feature-auth.yaml
-3. Monitor: /swarm status
-4. Consolidate: /swarm merge
+1. Write .spawnd/plans/feature-auth.yaml
+2. Run: /spawnd run feature-auth.yaml
+3. Monitor: /spawnd status
+4. Consolidate: /spawnd merge
 ```
 
 ## Agent Execution Model
@@ -905,12 +905,12 @@ Agent action:
 ```
 1. Run setup
    - Assign run_id (if not provided)
-   - Snapshot plan: .swarm/runs/{run_id}/plan.yaml
-   - Initialize DB: .swarm/runs/{run_id}/swarm.db
+   - Snapshot plan: .spawnd/runs/{run_id}/plan.yaml
+   - Initialize DB: .spawnd/runs/{run_id}/spawnd.db
 
 2. Spawn
-   - Create worktree: .swarm/runs/{run_id}/worktrees/{name}/
-   - Create branch: swarm/{run_id}/{name}
+   - Create worktree: .spawnd/runs/{run_id}/worktrees/{name}/
+   - Create branch: spawnd/{run_id}/{name}
    - Inject shared_context files
    - Inject dep branch files (if depends_on specified)
    - Insert agent record into DB (status: pending)
@@ -933,7 +933,7 @@ Agent action:
    - Dependent agents unblocked
 
 6. Merge
-   - User runs /swarm merge
+   - User runs /spawnd merge
    - Changes merged to main
    - Worktree + branch cleaned up
    - State archived
@@ -998,7 +998,7 @@ Please continue from where you left off, addressing the error above.
 
 ### Database Architecture
 
-All state is stored in SQLite per run (`.swarm/runs/{run_id}/swarm.db`) instead of JSON files:
+All state is stored in SQLite per run (`.spawnd/runs/{run_id}/spawnd.db`) instead of JSON files:
 
 | Problem | File-Based | SQLite |
 |---------|-----------|--------|
@@ -1020,7 +1020,7 @@ All state is stored in SQLite per run (`.swarm/runs/{run_id}/swarm.db`) instead 
 ```python
 def open_db(run_id: str) -> sqlite3.Connection:
     """Open DB with proper concurrency settings."""
-    db_path = Path(f".swarm/runs/{run_id}/swarm.db")
+    db_path = Path(f".spawnd/runs/{run_id}/spawnd.db")
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     db = sqlite3.connect(db_path, timeout=30.0)  # Wait up to 30s for locks
@@ -1045,7 +1045,7 @@ def open_db(run_id: str) -> sqlite3.Connection:
 ### Database Schema
 
 ```sql
--- .swarm/runs/{run_id}/swarm.db (WAL mode enabled)
+-- .spawnd/runs/{run_id}/spawnd.db (WAL mode enabled)
 
 CREATE TABLE plans (
     run_id TEXT PRIMARY KEY,
@@ -1173,8 +1173,8 @@ _db_local = threading.local()
 def get_db() -> sqlite3.Connection:
     """Get thread-local DB connection."""
     if not hasattr(_db_local, "conn"):
-        run_id = os.environ["SWARM_RUN_ID"]
-        _db_local.conn = sqlite3.connect(f".swarm/runs/{run_id}/swarm.db")
+        run_id = os.environ["SPAWND_RUN_ID"]
+        _db_local.conn = sqlite3.connect(f".spawnd/runs/{run_id}/spawnd.db")
         _db_local.conn.row_factory = sqlite3.Row
     return _db_local.conn
 
@@ -1193,8 +1193,8 @@ def get_db() -> sqlite3.Connection:
 async def mark_complete(args: dict) -> dict:
     """Worker signals completion - runs check gate."""
     db = get_db()
-    agent_name = os.environ["SWARM_AGENT_NAME"]
-    run_id = os.environ["SWARM_RUN_ID"]
+    agent_name = os.environ["SPAWND_AGENT_NAME"]
+    run_id = os.environ["SPAWND_RUN_ID"]
 
     # Get check command from DB
     row = db.execute(
@@ -1242,8 +1242,8 @@ async def mark_complete(args: dict) -> dict:
 async def request_clarification(args: dict, timeout: int = 300) -> dict:
     """Blocking call - polls DB for manager response."""
     db = get_db()
-    agent_name = os.environ["SWARM_AGENT_NAME"]
-    run_id = os.environ["SWARM_RUN_ID"]
+    agent_name = os.environ["SPAWND_AGENT_NAME"]
+    run_id = os.environ["SPAWND_RUN_ID"]
     clarification_id = uuid4().hex
 
     # Emit clarification event
@@ -1252,8 +1252,8 @@ async def request_clarification(args: dict, timeout: int = 300) -> dict:
         (clarification_id, run_id, agent_name, json.dumps({
             "question": args["question"],
             "escalate_to": args.get("escalate_to", "auto"),
-            "parent_agent": os.environ.get("SWARM_PARENT_AGENT"),
-            "tree_path": os.environ.get("SWARM_TREE_PATH"),
+            "parent_agent": os.environ.get("SPAWND_PARENT_AGENT"),
+            "tree_path": os.environ.get("SPAWND_TREE_PATH"),
         }))
     )
     db.execute(
@@ -1305,8 +1305,8 @@ async def request_clarification(args: dict, timeout: int = 300) -> dict:
 async def report_progress(args: dict) -> dict:
     """Non-blocking progress update."""
     db = get_db()
-    agent_name = os.environ["SWARM_AGENT_NAME"]
-    run_id = os.environ["SWARM_RUN_ID"]
+    agent_name = os.environ["SPAWND_AGENT_NAME"]
+    run_id = os.environ["SPAWND_RUN_ID"]
 
     db.execute(
         "INSERT INTO events (id, run_id, agent, event_type, data) VALUES (?, ?, ?, 'progress', ?)",
@@ -1340,7 +1340,7 @@ async def report_blocker(args: dict, timeout: int = 300) -> dict:
 def create_coordination_server():
     """Create in-process MCP server with coordination tools."""
     return create_sdk_mcp_server(
-        name="swarm-coordination",
+        name="spawnd-coordination",
         version="1.0.0",
         tools=[mark_complete, request_clarification, report_progress, report_blocker]
     )
@@ -1399,10 +1399,10 @@ def build_worker_options(config: AgentConfig, run_id: str) -> ClaudeAgentOptions
         model=config.model,
         max_turns=config.max_iterations,
         env={
-            "SWARM_RUN_ID": run_id,
-            "SWARM_AGENT_NAME": config.name,
-            "SWARM_PARENT_AGENT": config.parent or "",
-            "SWARM_TREE_PATH": config.tree_path(),
+            "SPAWND_RUN_ID": run_id,
+            "SPAWND_AGENT_NAME": config.name,
+            "SPAWND_PARENT_AGENT": config.parent or "",
+            "SPAWND_TREE_PATH": config.tree_path(),
             **(config.env or {}),
         },
         system_prompt=f"""You are an autonomous coding agent.
@@ -1446,7 +1446,7 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 from typing import AsyncIterator
 import logging
 
-logger = logging.getLogger("swarm")
+logger = logging.getLogger("spawnd")
 
 
 async def run_worker(
@@ -1565,9 +1565,9 @@ def build_manager_options(config: AgentConfig, run_id: str) -> ClaudeAgentOption
         permission_mode="bypassPermissions",
         model=config.model or "opus",  # Managers typically need stronger reasoning
         env={
-            "SWARM_RUN_ID": run_id,
-            "SWARM_AGENT_NAME": config.name,
-            "SWARM_TREE_PATH": config.tree_path(),
+            "SPAWND_RUN_ID": run_id,
+            "SPAWND_AGENT_NAME": config.name,
+            "SPAWND_TREE_PATH": config.tree_path(),
             **(config.env or {}),
         },
         system_prompt=f"""You are a manager agent coordinating worker agents.
@@ -1740,7 +1740,7 @@ def get_tree_path(db: sqlite3.Connection, run_id: str, agent_name: str) -> str:
 
 def log_to_file(run_id: str, agent_name: str, text: str) -> None:
     """Append agent output to log file."""
-    log_path = Path(f".swarm/runs/{run_id}/logs/{agent_name}.log")
+    log_path = Path(f".spawnd/runs/{run_id}/logs/{agent_name}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a") as f:
         f.write(f"[{datetime.now().isoformat()}] {text}\n")
@@ -1853,7 +1853,7 @@ def create_worktree(run_id: str, agent_name: str, repo_path: Path = None) -> Pat
     """
     repo = repo_path or Path.cwd()
     worktree_path = repo / "worktrees" / run_id / agent_name
-    branch_name = f"swarm/{run_id}/{agent_name}"
+    branch_name = f"spawnd/{run_id}/{agent_name}"
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1882,7 +1882,7 @@ def setup_worktree_with_deps(
     """Merge dependency branches into agent's worktree."""
 
     for dep_name in depends_on:
-        dep_branch = f"swarm/{run_id}/{dep_name}"
+        dep_branch = f"spawnd/{run_id}/{dep_name}"
 
         if context_config.mode == "full":
             # Full merge - all files from dep branch
@@ -1965,14 +1965,14 @@ This allows dependent agents to:
 ### Overview
 
 The scheduler is **CLI-driven** with **in-process async execution**:
-- `swarm run` starts the scheduler
+- `spawnd run` starts the scheduler
 - Workers run as independent `query()` calls in asyncio tasks
 - Managers run via `ClaudeSDKClient` with event injection
 - Scheduler polls DB for completion, handles cost limits
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    swarm run plan.yaml                   │
+│                    spawnd run plan.yaml                   │
 └────────────────────────┬────────────────────────────────┘
                          │
                          ▼
@@ -2102,7 +2102,7 @@ class Scheduler:
         self.db.execute("""
             UPDATE agents SET worktree = ?, branch = ?
             WHERE run_id = ? AND name = ?
-        """, (str(worktree_path), f"swarm/{self.run_id}/{name}", self.run_id, name))
+        """, (str(worktree_path), f"spawnd/{self.run_id}/{name}", self.run_id, name))
         self.db.commit()
 
         # 4. Spawn as asyncio task based on type
@@ -2159,17 +2159,17 @@ class Scheduler:
         )
         self.db.commit()
 
-        logging.warning(f"Run {self.run_id} paused: cost budget exceeded. Use 'swarm resume {self.run_id} --add-budget <amount>' to continue.")
+        logging.warning(f"Run {self.run_id} paused: cost budget exceeded. Use 'spawnd resume {self.run_id} --add-budget <amount>' to continue.")
 ```
 
 **Resume after cost pause:**
 
 ```bash
 # Resume with additional budget
-swarm resume <run_id> --add-budget 10.0
+spawnd resume <run_id> --add-budget 10.0
 
 # Or just resume (continues with current budget, will pause again if exceeded)
-swarm resume <run_id>
+spawnd resume <run_id>
 ```
 
 ```python
@@ -2209,13 +2209,13 @@ async def resume_paused_run(run_id: str, add_budget: float = 0.0) -> None:
 
 ### Crash Recovery
 
-The scheduler is in-process - if `swarm run` crashes, agents die. Recovery uses **resume-from-DB**:
+The scheduler is in-process - if `spawnd run` crashes, agents die. Recovery uses **resume-from-DB**:
 
 **State preserved on crash:**
 - All agent states in SQLite (status, iteration, session_id, cost)
 - Worktrees persist on disk
 - Branches persist in git
-- Plan snapshot in `.swarm/runs/{run_id}/plan.yaml`
+- Plan snapshot in `.spawnd/runs/{run_id}/plan.yaml`
 
 **State lost on crash:**
 - In-flight work since last git commit
@@ -2225,8 +2225,8 @@ The scheduler is in-process - if `swarm run` crashes, agents die. Recovery uses 
 
 ```bash
 # Resume a crashed run
-swarm resume <run_id>
-# Equivalent to: swarm run --resume --run-id <run_id>
+spawnd resume <run_id>
+# Equivalent to: spawnd run --resume --run-id <run_id>
 ```
 
 ```python
@@ -2235,7 +2235,7 @@ async def resume_run(run_id: str) -> None:
     db = open_db(run_id)
 
     # Load plan from snapshot
-    plan_path = Path(f".swarm/runs/{run_id}/plan.yaml")
+    plan_path = Path(f".spawnd/runs/{run_id}/plan.yaml")
     plan = parse_plan_spec(plan_path.read_text())
 
     # Find agents that need restart
@@ -2342,9 +2342,9 @@ Branches merged in **dependency order** (topological sort):
 ```
 Example: auth, cache → integration
 
-1. Merge swarm/{run_id}/auth → main
-2. Merge swarm/{run_id}/cache → main
-3. Merge swarm/{run_id}/integration → main (has both deps' changes)
+1. Merge spawnd/{run_id}/auth → main
+2. Merge spawnd/{run_id}/cache → main
+3. Merge spawnd/{run_id}/integration → main (has both deps' changes)
 ```
 
 ### Conflict Resolution
@@ -2361,7 +2361,7 @@ async def merge_with_conflict_resolution(run_id: str, branches: list[str]) -> Me
         result = git_merge(branch)
 
         if result.has_conflicts:
-            # Extract agent name from branch (swarm/{run_id}/{agent_name})
+            # Extract agent name from branch (spawnd/{run_id}/{agent_name})
             agent_name = branch.split("/")[-1]
             resolver_name = f"resolver-{agent_name}"
 
@@ -2423,7 +2423,7 @@ Call mark_complete() when all conflicts are resolved."""
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    swarm merge                           │
+│                    spawnd merge                           │
 └────────────────────────┬────────────────────────────────┘
                          │
                          ▼
@@ -2473,13 +2473,13 @@ Call mark_complete() when all conflicts are resolved."""
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  SWARM DASHBOARD                                    feature-auth │
+│  SPAWND DASHBOARD                                    feature-auth │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  Agent         Status      Iter    Branch          Check  Cost  │
 │  ──────────────────────────────────────────────────────────────  │
-│  ▶ auth        ● running   12/30   swarm/{run_id}/auth      …     $0.15  │
-│    cache       ✓ done       8/30   swarm/{run_id}/cache     ✓     $0.12  │
+│  ▶ auth        ● running   12/30   spawnd/{run_id}/auth      …     $0.15  │
+│    cache       ✓ done       8/30   spawnd/{run_id}/cache     ✓     $0.12  │
 │    integration ○ pending    0/30   —               —     —      │
 │                                                                  │
 ├─────────────────────────────────────────────────────────────────┤
@@ -2519,8 +2519,8 @@ from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Log, Footer
 from textual.containers import Vertical
 
-class SwarmDashboard(App):
-    """TUI dashboard for swarm monitoring using SQLite."""
+class SpawndDashboard(App):
+    """TUI dashboard for spawnd monitoring using SQLite."""
 
     BINDINGS = [
         ("c", "cancel", "Cancel"),
@@ -2534,7 +2534,7 @@ class SwarmDashboard(App):
         super().__init__()
         self.run_id = run_id
         if db_path is None:
-            db_path = f".swarm/runs/{run_id}/swarm.db"
+            db_path = f".spawnd/runs/{run_id}/spawnd.db"
         self.db = sqlite3.connect(db_path)
         self.db.row_factory = sqlite3.Row
 
@@ -2612,11 +2612,11 @@ User Request
 │  2. Refine plan                                │
 │  3. Break down into tasks                      │
 │  4. Formulate dependency order                 │
-│  5. Spawn subagents: /swarm run plan.yaml      │
-│  6. Monitor: /swarm status                     │
+│  5. Spawn subagents: /spawnd run plan.yaml      │
+│  6. Monitor: /spawnd status                     │
 │  7. Collate results                            │
 │  8. Review work                                │
-│  9. Merge: /swarm merge                        │
+│  9. Merge: /spawnd merge                        │
 │                                                 │
 └─────────────────┬──────────────────────────────┘
                   │
@@ -2662,9 +2662,9 @@ You are an autonomous software engineering manager agent.
 4. Write a plan spec file
 
 ### Phase 3: Execute
-1. Create plan spec: `.swarm/plans/{{plan_name}}.yaml`
-2. Spawn subagents: `/swarm run .swarm/plans/{{plan_name}}.yaml`
-3. Monitor progress: `/swarm status`
+1. Create plan spec: `.spawnd/plans/{{plan_name}}.yaml`
+2. Spawn subagents: `/spawnd run .spawnd/plans/{{plan_name}}.yaml`
+3. Monitor progress: `/spawnd status`
 
 ### Phase 4: Review
 1. When all agents complete, review their work
@@ -2672,7 +2672,7 @@ You are an autonomous software engineering manager agent.
 3. Run integration tests
 
 ### Phase 5: Consolidate
-1. Merge branches: `/swarm merge`
+1. Merge branches: `/spawnd merge`
 2. Resolve any conflicts
 3. Run final tests
 4. Call mark_plan_complete() when done
@@ -2685,10 +2685,10 @@ Commit at milestones:
 - After successful merge
 
 ## Tools Available
-- `/swarm run plan.yaml` - Execute plan with subagents
-- `/swarm status` - Check agent status
-- `/swarm merge` - Consolidate completed branches
-- `/swarm cancel` - Stop agents if needed
+- `/spawnd run plan.yaml` - Execute plan with subagents
+- `/spawnd status` - Check agent status
+- `/spawnd merge` - Consolidate completed branches
+- `/spawnd cancel` - Stop agents if needed
 
 ## Output
 When task is complete, call mark_plan_complete(summary)
@@ -2934,10 +2934,10 @@ Agents can spawn subagents recursively (unlimited nesting).
 **Flat worktrees with namespaced names:**
 
 ```
-.swarm/
+.spawnd/
 └── runs/
     └── {run_id}/
-        ├── swarm.db                        # All agent state in SQLite
+        ├── spawnd.db                        # All agent state in SQLite
         ├── worktrees/
         │   ├── manager/                    # Root manager
         │   ├── manager.auth/               # Manager's worker
@@ -2960,16 +2960,16 @@ Agents can spawn subagents recursively (unlimited nesting).
 **Bottom-up merging** - deepest workers merge first, then up to root:
 
 ```
-1. manager.auth.tokens completes → stays on branch swarm/{run_id}/manager.auth.tokens
+1. manager.auth.tokens completes → stays on branch spawnd/{run_id}/manager.auth.tokens
 2. manager.auth.validation completes → stays on branch
 3. manager.auth (sub-manager) merges its workers:
-   - Merge swarm/{run_id}/manager.auth.tokens → swarm/{run_id}/manager.auth
-   - Merge swarm/{run_id}/manager.auth.validation → swarm/{run_id}/manager.auth
+   - Merge spawnd/{run_id}/manager.auth.tokens → spawnd/{run_id}/manager.auth
+   - Merge spawnd/{run_id}/manager.auth.validation → spawnd/{run_id}/manager.auth
 4. manager.cache completes
 5. manager (root) merges:
-   - Merge swarm/{run_id}/manager.auth → swarm/{run_id}/manager
-   - Merge swarm/{run_id}/manager.cache → swarm/{run_id}/manager
-6. Final: merge swarm/{run_id}/manager → main
+   - Merge spawnd/{run_id}/manager.auth → spawnd/{run_id}/manager
+   - Merge spawnd/{run_id}/manager.cache → spawnd/{run_id}/manager
+6. Final: merge spawnd/{run_id}/manager → main
 ```
 
 ### Failure Cascades
@@ -3030,7 +3030,7 @@ class CircuitBreaker:
 
 ### Parallel (default)
 ```bash
-swarm run -p "auth: Impl auth" -p "cache: Impl cache" -p "log: Impl logging"
+spawnd run -p "auth: Impl auth" -p "cache: Impl cache" -p "log: Impl logging"
 ```
 - All agents spawn immediately
 - Run independently in separate worktrees
@@ -3038,17 +3038,17 @@ swarm run -p "auth: Impl auth" -p "cache: Impl cache" -p "log: Impl logging"
 
 ### Sequential (`--seq`)
 ```bash
-swarm run --seq -p "plan: Create plan" -p "impl: Execute" -p "review: Review"
+spawnd run --seq -p "plan: Create plan" -p "impl: Execute" -p "review: Review"
 ```
 - Each agent waits for previous to call `mark_complete()`
 - Next agent starts from previous agent's branch (not main)
 - Artifacts passed via committed files (PLAN.md, etc.)
-- Branch chain: `main → swarm/{run_id}/plan → swarm/{run_id}/impl → swarm/{run_id}/review`
-- Final merge: `swarm/{run_id}/review → main` (contains all changes)
+- Branch chain: `main → spawnd/{run_id}/plan → spawnd/{run_id}/impl → spawnd/{run_id}/review`
+- Final merge: `spawnd/{run_id}/review → main` (contains all changes)
 
 ### DAG (via plan spec)
 ```yaml
-# .swarm/plans/feature.yaml
+# .spawnd/plans/feature.yaml
 name: feature-auth
 agents:
   - name: auth
@@ -3060,14 +3060,14 @@ agents:
     depends_on: [auth, cache]
 ```
 ```bash
-swarm run .swarm/plans/feature.yaml
+spawnd run .spawnd/plans/feature.yaml
 ```
 - Dependency resolution via topological sort
 - Parallel where possible, sequential where required
 
 ### Pattern (`--each`)
 ```bash
-swarm run --each "src/services/*.py" -p "Add type hints to {file}"
+spawnd run --each "src/services/*.py" -p "Add type hints to {file}"
 ```
 - Glob expansion → N agents
 - Each agent works on single file in isolated worktree
@@ -3085,7 +3085,7 @@ Human-readable format for easy debugging:
 [TIMESTAMP] [LEVEL] [AGENT] MESSAGE
 
 # Examples
-[12:05:23] INFO  [auth] Agent spawned in .swarm/runs/{run_id}/worktrees/auth
+[12:05:23] INFO  [auth] Agent spawned in .spawnd/runs/{run_id}/worktrees/auth
 [12:05:24] INFO  [auth] Running prompt: Implement JWT auth...
 [12:05:26] DEBUG [auth] Tool: Read src/auth/__init__.py
 [12:05:28] DEBUG [auth] Tool: Write src/auth/tokens.py
@@ -3099,9 +3099,9 @@ Human-readable format for easy debugging:
 ### Log Locations
 
 ```
-.swarm/runs/{run_id}/
+.spawnd/runs/{run_id}/
 └── logs/
-    ├── swarm.log           # Main scheduler log
+    ├── spawnd.log           # Main scheduler log
     ├── auth.log            # Per-agent logs
     ├── cache.log
     └── integration.log
@@ -3123,16 +3123,16 @@ import logging
 from pathlib import Path
 
 def setup_logging(run_dir: Path) -> logging.Logger:
-    """Configure logging for swarm."""
+    """Configure logging for spawnd."""
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Main swarm logger
-    logger = logging.getLogger("swarm")
+    # Main spawnd logger
+    logger = logging.getLogger("spawnd")
     logger.setLevel(logging.DEBUG)
 
     # File handler for main log
-    main_handler = logging.FileHandler(log_dir / "swarm.log")
+    main_handler = logging.FileHandler(log_dir / "spawnd.log")
     main_handler.setFormatter(logging.Formatter(
         "[%(asctime)s] %(levelname)-5s [%(agent)s] %(message)s",
         datefmt="%H:%M:%S"
@@ -3154,7 +3154,7 @@ def setup_logging(run_dir: Path) -> logging.Logger:
 def get_agent_logger(name: str, run_dir: Path) -> logging.Logger:
     """Get logger for specific agent."""
     log_dir = run_dir / "logs"
-    logger = logging.getLogger(f"swarm.{name}")
+    logger = logging.getLogger(f"spawnd.{name}")
 
     # Per-agent file handler
     handler = logging.FileHandler(log_dir / f"{name}.log")
@@ -3169,7 +3169,7 @@ def get_agent_logger(name: str, run_dir: Path) -> logging.Logger:
 
 ### Telemetry (Prompt + Tool Trace)
 
-Stored per run under `.swarm/runs/{run_id}/telemetry/`:
+Stored per run under `.spawnd/runs/{run_id}/telemetry/`:
 
 - `prompts.jsonl` (prompt snapshots)
 - `tool_calls.jsonl` (tool call inputs/outputs)
@@ -3181,38 +3181,38 @@ Telemetry is configurable and should redact secrets by default.
 
 ```bash
 # View main scheduler log
-swarm logs
+spawnd logs
 
 # View specific agent log
-swarm logs auth
+spawnd logs auth
 
 # Follow mode (tail -f)
-swarm logs auth -f
+spawnd logs auth -f
 
 # Target a specific run
-swarm logs auth --run-id <id>
+spawnd logs auth --run-id <id>
 
 # Filter by level
-swarm logs auth --level error
+spawnd logs auth --level error
 
 # Show last N lines
-swarm logs auth -n 50
+spawnd logs auth -n 50
 
 # All agents interleaved
-swarm logs --all
+spawnd logs --all
 ```
 
 ### Debugging
 
 ```bash
 # Verbose mode (DEBUG level to console)
-swarm run plan.yaml --verbose
+spawnd run plan.yaml --verbose
 
 # Dry run (show what would happen without executing)
-swarm run plan.yaml --dry-run
+spawnd run plan.yaml --dry-run
 
 # Show dependency graph
-swarm run plan.yaml --show-deps
+spawnd run plan.yaml --show-deps
 
 # Agent 'auth' depends on nothing
 # Agent 'cache' depends on nothing
@@ -3225,32 +3225,32 @@ swarm run plan.yaml --show-deps
 
 **1. pip (CLI tool)**
 ```bash
-pip install claude-swarm
-swarm --help
+pip install spawnd.dev
+spawnd --help
 ```
 
 **2. Claude Code Plugin (slash commands)**
 ```bash
 # Install plugin
-claude plugins install claude-swarm
+claude plugins install spawnd.dev
 
 # Or manual install
-git clone https://github.com/user/claude-swarm ~/.claude/claude-swarm
+git clone https://github.com/user/spawnd.dev ~/.claude/spawnd.dev
 ```
 
 ### Package Structure
 
 ```
-claude-swarm/
+spawnd.dev/
 ├── pyproject.toml          # Package config
-├── swarm/                   # Python package
+├── spawnd/                   # Python package
 │   ├── __init__.py
 │   ├── cli.py             # Click CLI
 │   ├── ...
 ├── .claude-plugin/         # Claude Code plugin
 │   ├── plugin.json        # Plugin manifest
 │   └── commands/          # Slash commands
-│       └── swarm.md       # /swarm command
+│       └── spawnd.md       # /spawnd command
 └── README.md
 ```
 
@@ -3258,7 +3258,7 @@ claude-swarm/
 
 ```toml
 [project]
-name = "claude-swarm"
+name = "spawnd.dev"
 version = "0.1.0"
 description = "Multi-agent orchestration for Claude Code"
 requires-python = ">=3.10"
@@ -3278,7 +3278,7 @@ dev = [
 ]
 
 [project.scripts]
-swarm = "swarm.cli:main"
+spawnd = "spawnd.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -3290,19 +3290,19 @@ build-backend = "hatchling.build"
 ```json
 // .claude-plugin/plugin.json
 {
-  "name": "claude-swarm",
+  "name": "spawnd.dev",
   "version": "0.1.0",
   "description": "Multi-agent orchestration",
-  "commands": ["commands/swarm.md"]
+  "commands": ["commands/spawnd.md"]
 }
 ```
 
 ### Slash Command Definition
 
 ```markdown
-<!-- commands/swarm.md -->
+<!-- commands/spawnd.md -->
 ---
-name: swarm
+name: spawnd
 description: Multi-agent orchestration
 arguments:
   - name: args
@@ -3310,29 +3310,29 @@ arguments:
     required: false
 ---
 
-# /swarm
+# /spawnd
 
-Pass-through to swarm CLI.
+Pass-through to spawnd CLI.
 
 ## Usage
 ```
-/swarm run plan.yaml
-/swarm status
-/swarm merge
+/spawnd run plan.yaml
+/spawnd status
+/spawnd merge
 ```
 
 ## Implementation
 
 ```bash
 #!/bin/bash
-swarm "$@"
+spawnd "$@"
 ```
 ```
 
 ### User Configuration
 
 ```yaml
-# ~/.claude/swarm/config.yaml
+# ~/.claude/spawnd/config.yaml
 defaults:
   max_iterations: 30
   max_agents: 5
@@ -3340,16 +3340,16 @@ defaults:
 
 logging:
   level: info
-  dir: .swarm/runs/{run_id}/logs
+  dir: .spawnd/runs/{run_id}/logs
 
 telemetry:
   enabled: true
-  dir: .swarm/runs/{run_id}/telemetry
+  dir: .spawnd/runs/{run_id}/telemetry
   redact: true
 
 git:
-  worktree_dir: .swarm/runs/{run_id}/worktrees
-  branch_prefix: swarm/{run_id}/
+  worktree_dir: .spawnd/runs/{run_id}/worktrees
+  branch_prefix: spawnd/{run_id}/
   auto_cleanup: true
 ```
 
@@ -3357,22 +3357,22 @@ git:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SWARM_LOG_LEVEL` | `info` | Log verbosity |
-| `SWARM_MAX_AGENTS` | `5` | Max concurrent agents |
-| `SWARM_MODEL` | `sonnet` | Default model |
-| `SWARM_RUN_ID` | - | Override run id for `swarm run` |
-| `SWARM_RESUME` | `false` | Resume existing run when set |
-| `SWARM_TELEMETRY` | `true` | Enable or disable telemetry capture |
+| `SPAWND_LOG_LEVEL` | `info` | Log verbosity |
+| `SPAWND_MAX_AGENTS` | `5` | Max concurrent agents |
+| `SPAWND_MODEL` | `sonnet` | Default model |
+| `SPAWND_RUN_ID` | - | Override run id for `spawnd run` |
+| `SPAWND_RESUME` | `false` | Resume existing run when set |
+| `SPAWND_TELEMETRY` | `true` | Enable or disable telemetry capture |
 | `ANTHROPIC_API_KEY` | - | Required for SDK |
 
 ### First Run Setup
 
 ```bash
 # After installation
-swarm init
+spawnd init
 
 # Creates:
-# - ~/.claude/swarm/config.yaml (default config)
+# - ~/.claude/spawnd/config.yaml (default config)
 # - Run-specific log/telemetry dirs created on first run
 # - Validates Claude SDK is available
 ```
@@ -3485,7 +3485,7 @@ async def test_scheduler_parallel_execution(mock_sdk, tmp_path):
     # Create test database
     db = open_db(plan.run.id if plan.run else f"{plan.name}-test")
 
-    with patch("swarm.executor.ClaudeSDKClient", mock_sdk):
+    with patch("spawnd.runtime.executors.claude.ClaudeSDKClient", mock_sdk):
         scheduler = Scheduler(db, plan)
         result = await scheduler.run()
 
@@ -3515,7 +3515,7 @@ async def test_scheduler_dependency_order(mock_sdk, tmp_path):
 
     db = open_db(f"{plan.name}-test")
 
-    with patch("swarm.executor.ClaudeSDKClient", TrackingMockClient):
+    with patch("spawnd.runtime.executors.claude.ClaudeSDKClient", TrackingMockClient):
         scheduler = Scheduler(db, plan)
         await scheduler.run()
 
@@ -3560,7 +3560,7 @@ def test_merge_branches(git_repo):
     subprocess.run(["git", "commit", "-m", "Agent 2"], cwd=wt2)
 
     # Merge both
-    merge_branches(git_repo, [f"swarm/{run_id}/agent-1", f"swarm/{run_id}/agent-2"])
+    merge_branches(git_repo, [f"spawnd/{run_id}/agent-1", f"spawnd/{run_id}/agent-2"])
 
     # Verify both files exist on main
     assert (git_repo / "file1.txt").exists()
@@ -3589,13 +3589,13 @@ async def test_full_parallel_workflow(git_repo):
     on_complete: merge
     """
 
-    plan_path = git_repo / ".swarm/plans/test.yaml"
+    plan_path = git_repo / ".spawnd/plans/test.yaml"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(plan_content)
 
-    # Run swarm
+    # Run spawnd
     result = subprocess.run(
-        ["swarm", "run", str(plan_path)],
+        ["spawnd", "run", str(plan_path)],
         cwd=git_repo,
         capture_output=True,
         timeout=300,  # 5 min timeout
@@ -3628,8 +3628,8 @@ def agent_state():
         status="running",
         iteration=5,
         max_iterations=30,
-        worktree=".swarm/runs/test-run/worktrees/test",
-        branch="swarm/test-run/test",
+        worktree=".spawnd/runs/test-run/worktrees/test",
+        branch="spawnd/test-run/test",
     )
 ```
 
@@ -3691,7 +3691,7 @@ jobs:
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   ├── __init__.py
 │   ├── cli.py              # Click CLI: run, status, cancel, db
 │   ├── models.py           # Pydantic: AgentConfig, PlanSpec
@@ -3704,22 +3704,22 @@ Files:
 ```
 
 Tasks:
-1. Click CLI skeleton with `swarm run`, `swarm status`, `swarm cancel`, `swarm db`
+1. Click CLI skeleton with `spawnd run`, `spawnd status`, `spawnd cancel`, `spawnd db`
 2. Pydantic models for AgentConfig, PlanSpec
-3. SQLite database setup with WAL mode (.swarm/runs/{run_id}/swarm.db)
-4. Git worktree creation (.swarm/runs/{run_id}/worktrees/{name}/)
+3. SQLite database setup with WAL mode (.spawnd/runs/{run_id}/spawnd.db)
+4. Git worktree creation (.spawnd/runs/{run_id}/worktrees/{name}/)
 5. Worker toolset implementation (mark_complete, report_progress)
 6. SDK agent spawning with standard toolset
 7. Basic status table output (from DB query)
 
-**Deliverable**: `swarm run -p "auth: Impl auth"` spawns one background agent with tool-based completion
+**Deliverable**: `spawnd run -p "auth: Impl auth"` spawns one background agent with tool-based completion
 
 ### Phase 2: Plan Specs & Parallel Execution (v0.1)
 **Goal**: YAML plan specs, parallel agent coordination
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   ├── parser.py           # YAML plan spec parsing
 │   ├── scheduler.py        # Parallel/sequential execution
 │   └── deps.py             # Dependency resolution
@@ -3733,27 +3733,27 @@ Tasks:
 5. Inline execution (`-p` flags)
 6. Cost tracking and limits
 
-**Deliverable**: `swarm run plan.yaml` executes multi-agent pipeline with cost controls
+**Deliverable**: `spawnd run plan.yaml` executes multi-agent pipeline with cost controls
 
 ### Phase 3: Merge & Logs (v0.1)
 **Goal**: Branch consolidation, log viewing
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   ├── merge.py            # Git merge logic with fallback config
 │   └── logs.py             # Log tailing
 ```
 
 Tasks:
-1. `swarm merge` - consolidate completed branches
-2. `swarm logs {name}` - view agent logs
-3. `swarm logs {name} -f` - follow mode
+1. `spawnd merge` - consolidate completed branches
+2. `spawnd logs {name}` - view agent logs
+3. `spawnd logs {name} -f` - follow mode
 4. Auto-cleanup worktrees on merge
 5. Conflict detection with configurable fallback (spawn_resolver, manual, fail)
 6. Manual conflict resolution mode
 
-**Deliverable**: `swarm merge` consolidates all completed work with conflict handling options
+**Deliverable**: `spawnd merge` consolidates all completed work with conflict handling options
 
 ---
 
@@ -3762,7 +3762,7 @@ Tasks:
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   └── dashboard.py        # Textual TUI
 ```
 
@@ -3772,14 +3772,14 @@ Tasks:
 3. Keyboard controls (cancel, view logs)
 4. Auto-refresh from state files
 
-**Deliverable**: `swarm dashboard` shows live status with controls
+**Deliverable**: `spawnd dashboard` shows live status with controls
 
 ### Phase 5: Event System & Orchestration (v0.2)
 **Goal**: Manager-worker coordination via events and blocking tools
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   ├── events.py           # Event queries and emission (uses DB)
 │   ├── orchestration.py    # Circuit breaker, failure cascades
 │   ├── manager_loop.py     # Manual loop for manager agents
@@ -3804,7 +3804,7 @@ Tasks:
 
 ```
 Files:
-├── swarm/
+├── spawnd/
 │   ├── roles.py            # Role definitions and loading
 │   ├── templates.py        # Template expansion
 │   └── roles/              # Built-in role YAML files
@@ -3826,7 +3826,7 @@ Tasks:
 5. `--template` flag for CLI
 6. Dynamic tree generation by architect agents
 
-**Deliverable**: `swarm run --template feature "Implement auth"` expands to full pipeline
+**Deliverable**: `spawnd run --template feature "Implement auth"` expands to full pipeline
 
 ### Phase 7: Slash Command & Polish (v0.4)
 **Goal**: Claude Code integration, DX refinements
@@ -3834,16 +3834,16 @@ Tasks:
 ```
 Files:
 ├── commands/
-│   └── swarm.md            # Single /swarm slash command
+│   └── spawnd.md            # Single /spawnd slash command
 ```
 
 Tasks:
-1. `/swarm` slash command (pass-through to CLI)
+1. `/spawnd` slash command (pass-through to CLI)
 2. Pattern mode (`--each`)
 3. Error handling improvements
 4. Auto-merge on completion (`on_complete: merge`)
 5. Per-agent failure modes (`on_failure: continue|stop|retry`)
-6. `swarm init` first-run setup
+6. `spawnd init` first-run setup
 
 **Deliverable**: Full integration with Claude Code
 
@@ -3851,17 +3851,17 @@ Tasks:
 
 | Aspect | Original | Revised |
 |--------|----------|---------|
-| Primary interface | Slash commands | CLI (`swarm`) |
-| Slash commands | 7 separate commands | 1 pass-through (`/swarm`) |
+| Primary interface | Slash commands | CLI (`spawnd`) |
+| Slash commands | 7 separate commands | 1 pass-through (`/spawnd`) |
 | Input format | Inline prompts | Plan spec YAML files |
 | Agent naming | Explicit `--name` | Inferred from prompt |
 | Loop mode | Hook-based, in-session | Eliminated (background only) |
 | Completion signal | `<done/>` text marker | `mark_complete()` tool via MCP |
 | Execution model | SDK subagents | `query()` tasks (workers) + `ClaudeSDKClient` (managers) |
 | Worker coordination | Text markers, polling | In-process MCP tools with DB polling |
-| State storage | JSON files | SQLite database (.swarm/runs/{run_id}/swarm.db) |
-| Worktrees | `./worktrees/` (visible) | `.swarm/runs/{run_id}/worktrees/` (hidden) |
-| Branches | `{name}` | `swarm/{run_id}/{name}` (namespaced) |
+| State storage | JSON files | SQLite database (.spawnd/runs/{run_id}/spawnd.db) |
+| Worktrees | `./worktrees/` (visible) | `.spawnd/runs/{run_id}/worktrees/` (hidden) |
+| Branches | `{name}` | `spawnd/{run_id}/{name}` (namespaced) |
 | Progress | Polling /status | Dashboard TUI |
 | Two-system arch | Loop vs Orchestration | Single system (async tasks + MCP tools) |
 | Target user | Human developer | Human + other agents |
@@ -3875,8 +3875,8 @@ Tasks:
 |----------|--------|-----------|
 | Agent naming | Infer from prompt | "Implement auth" → `auth`, better DX |
 | Run identity | Generated `run_id` per run | Namespaces state + enables resume |
-| Worktree location | `.swarm/runs/{run_id}/worktrees/` | Hidden, cleaner project root |
-| Branch naming | Prefixed `swarm/{run_id}/{name}` | Namespaced, avoids conflicts |
+| Worktree location | `.spawnd/runs/{run_id}/worktrees/` | Hidden, cleaner project root |
+| Branch naming | Prefixed `spawnd/{run_id}/{name}` | Namespaced, avoids conflicts |
 | Cleanup policy | Auto on merge | Less manual work, clean state |
 | Worker execution | Async `query()` tasks | True parallelism, no SDK subagent limits |
 | Manager execution | `ClaudeSDKClient` | Stateful multi-turn with event injection |
@@ -3907,15 +3907,15 @@ def infer_agent_name(prompt: str) -> str:
 
 ```
 PROJECT/
-├── .swarm/                      # All swarm state (per-project)
+├── .spawnd/                      # All spawnd state (per-project)
 │   ├── plans/                   # User-created plan specs (YAML)
 │   │   └── feature-auth.yaml
 │   └── runs/
 │       └── {run_id}/
 │           ├── plan.yaml         # Snapshot of plan used for resume
-│           ├── swarm.db          # SQLite database (WAL mode)
-│           ├── swarm.db-wal      # WAL file (auto-managed)
-│           ├── swarm.db-shm      # Shared memory (auto-managed)
+│           ├── spawnd.db          # SQLite database (WAL mode)
+│           ├── spawnd.db-wal      # WAL file (auto-managed)
+│           ├── spawnd.db-shm      # Shared memory (auto-managed)
 │           ├── worktrees/        # Agent worktrees (git ignored)
 │           │   ├── auth/
 │           │   └── cache/
@@ -3926,10 +3926,10 @@ PROJECT/
 │               ├── prompts.jsonl
 │               ├── tool_calls.jsonl
 │               └── costs.jsonl
-├── .gitignore                   # Contains: .swarm/runs/
+├── .gitignore                   # Contains: .spawnd/runs/
 └── ...
 
-~/.claude/swarm/                 # Global config (shared across projects)
+~/.claude/spawnd/                 # Global config (shared across projects)
 └── config.yaml                  # User defaults
 ```
 
@@ -3944,12 +3944,12 @@ PROJECT/
 ```
 main
  │
- ├── swarm/{run_id}/auth     (agent: auth)
- ├── swarm/{run_id}/cache    (agent: cache)
- └── swarm/{run_id}/logging  (agent: logging)
+ ├── spawnd/{run_id}/auth     (agent: auth)
+ ├── spawnd/{run_id}/cache    (agent: cache)
+ └── spawnd/{run_id}/logging  (agent: logging)
 
 After merge:
-main ← swarm/{run_id}/auth ← swarm/{run_id}/cache ← swarm/{run_id}/logging
+main ← spawnd/{run_id}/auth ← spawnd/{run_id}/cache ← spawnd/{run_id}/logging
        (deleted)    (deleted)     (deleted)
 ```
 
@@ -4003,11 +4003,11 @@ Status as of 2025-01-18. Features documented above but not yet fully implemented
 - Missing: `templates.py` module
 - Missing: `--template` CLI flag
 - Missing: Template YAML files
-- Current: Roles hard-coded in `swarm/roles.py`
+- Current: Roles hard-coded in `spawnd/roles.py`
 
 **Phase 7: Slash Commands (v0.4)**
 - Missing: Plugin integration
-- Missing: `/swarm` pass-through command
+- Missing: `/spawnd` pass-through command
 
 ### Test Coverage Gaps
 

@@ -1,6 +1,6 @@
 """Tests for roles module."""
 
-from swarm.roles import (
+from spawnd.roles import (
     BUILTIN_ROLES,
     apply_role,
     get_role,

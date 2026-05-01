@@ -1,25 +1,25 @@
-"""Tests for the public Python API (swarm.api)."""
+"""Tests for the public Python API (spawnd.api)."""
 
 import pytest
 
-from swarm import AgentSpec, PlanSpec, agent, handoff, pipeline, run
-from swarm.storage.db import get_agents, get_db, get_plan
+from spawnd import AgentSpec, PlanSpec, agent, handoff, pipeline, run
+from spawnd.storage.db import get_agents, get_db, get_plan
 
 
 @pytest.fixture
-def swarm_env(tmp_path, monkeypatch):
-    """Point swarm at a fresh tmp directory and stub worktree creation."""
+def spawnd_env(tmp_path, monkeypatch):
+    """Point spawnd at a fresh tmp directory and stub worktree creation."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".swarm" / "runs").mkdir(parents=True)
+    (tmp_path / ".spawnd" / "runs").mkdir(parents=True)
 
     def fake_create_worktree(run_id, agent_name, *args, **kwargs):
-        path = tmp_path / ".swarm" / "runs" / run_id / "worktrees" / agent_name
+        path = tmp_path / ".spawnd" / "runs" / run_id / "worktrees" / agent_name
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    monkeypatch.setattr("swarm.runtime.scheduler.create_worktree", fake_create_worktree)
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", fake_create_worktree)
     monkeypatch.setattr(
-        "swarm.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None
+        "spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *a, **kw: None
     )
     return tmp_path
 
@@ -59,7 +59,7 @@ def test_agent_builder_passes_through_fields():
 
 
 @pytest.mark.asyncio
-async def test_run_single_agent_completes(swarm_env):
+async def test_run_single_agent_completes(spawnd_env):
     result = await run(
         [agent("solo", "do the thing", check="true")],
         name="api-single",
@@ -80,18 +80,18 @@ async def test_run_single_agent_completes(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_run_with_explicit_run_id(swarm_env):
+async def test_run_with_explicit_run_id(spawnd_env):
     result = await run(
         [agent("a", "task", check="true")],
         run_id="explicit-run-id-001",
         use_mock=True,
     )
     assert result.run_id == "explicit-run-id-001"
-    assert (swarm_env / ".swarm" / "runs" / "explicit-run-id-001" / "swarm.db").exists()
+    assert (spawnd_env / ".spawnd" / "runs" / "explicit-run-id-001" / "spawnd.db").exists()
 
 
 @pytest.mark.asyncio
-async def test_run_with_dependency_runs_both(swarm_env):
+async def test_run_with_dependency_runs_both(spawnd_env):
     result = await run(
         [
             agent("first", "step 1", check="true"),
@@ -106,7 +106,7 @@ async def test_run_with_dependency_runs_both(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_plan_spec_input_is_accepted(swarm_env):
+async def test_plan_spec_input_is_accepted(spawnd_env):
     """run() should accept a PlanSpec directly, not just a list of agents."""
     plan = PlanSpec(
         name="direct-plan",
@@ -118,7 +118,7 @@ async def test_plan_spec_input_is_accepted(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_invalid_plan_raises_value_error(swarm_env):
+async def test_invalid_plan_raises_value_error(spawnd_env):
     """Circular dependencies must be rejected before the scheduler runs."""
     with pytest.raises(ValueError, match="Invalid plan"):
         await run(
@@ -131,7 +131,23 @@ async def test_invalid_plan_raises_value_error(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_unknown_dependency_raises(swarm_env):
+async def test_run_resume_requires_run_id(spawnd_env):
+    with pytest.raises(ValueError, match="resume=True requires run_id"):
+        await run([agent("a", "x")], resume=True, use_mock=True)
+
+
+@pytest.mark.asyncio
+async def test_run_resume_rejects_stale_run_db(spawnd_env):
+    stale = spawnd_env / ".spawnd" / "runs" / "stale-run"
+    stale.mkdir(parents=True)
+    (stale / "spawnd.db").write_text("")
+
+    with pytest.raises(ValueError, match="Run not found: stale-run"):
+        await run([agent("a", "x")], run_id="stale-run", resume=True, use_mock=True)
+
+
+@pytest.mark.asyncio
+async def test_unknown_dependency_raises(spawnd_env):
     with pytest.raises(ValueError, match="Invalid plan"):
         await run(
             [agent("a", "x", depends_on=["nonexistent"])],
@@ -140,7 +156,7 @@ async def test_unknown_dependency_raises(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_auto_chains_depends_on(swarm_env):
+async def test_pipeline_auto_chains_depends_on(spawnd_env):
     """pipeline() should thread depends_on by list order without mutating inputs."""
     a = agent("a", "x", check="true")
     b = agent("b", "y", check="true")
@@ -158,7 +174,7 @@ async def test_pipeline_auto_chains_depends_on(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_preserves_existing_depends_on(swarm_env):
+async def test_pipeline_preserves_existing_depends_on(spawnd_env):
     """A step that already depends on something else keeps that edge."""
     independent = agent("shared", "x", check="true")
     a = agent("a", "y", check="true")
@@ -170,7 +186,7 @@ async def test_pipeline_preserves_existing_depends_on(swarm_env):
 
 
 @pytest.mark.asyncio
-async def test_handoff_runs_both(swarm_env):
+async def test_handoff_runs_both(spawnd_env):
     result = await handoff(
         agent("a", "first", check="true"),
         agent("b", "second", check="true"),
