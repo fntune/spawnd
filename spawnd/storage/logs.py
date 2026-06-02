@@ -1,17 +1,13 @@
 """Log viewing for spawnd.dev."""
-
 import logging
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-
 from spawnd.storage.paths import ensure_log_file, get_log_path, get_logs_dir
+logger = logging.getLogger('spawnd.logs')
 
-logger = logging.getLogger("spawnd.logs")
-
-
-def read_log(run_id: str, agent_name: str, lines: int | None = None, base_path: Path | None = None) -> str:
+def read_log(run_id: str, agent_name: str, lines: int | None=None, base_path: Path | None=None) -> str:
     """Read agent log file.
 
     Args:
@@ -24,26 +20,15 @@ def read_log(run_id: str, agent_name: str, lines: int | None = None, base_path: 
         Log content
     """
     log_path = get_log_path(run_id, agent_name, base_path)
-
     if not log_path.exists():
-        return f"Log file not found: {log_path}"
-
+        return f'Log file not found: {log_path}'
     content = log_path.read_text()
-
     if lines is not None:
-        content_lines = content.split("\n")
-        content = "\n".join(content_lines[-lines:])
-
+        content_lines = content.split('\n')
+        content = '\n'.join(content_lines[-lines:])
     return content
 
-
-def tail_log(
-    run_id: str,
-    agent_name: str,
-    follow: bool = True,
-    interval: float = 0.5,
-    base_path: Path | None = None,
-) -> None:
+def tail_log(run_id: str, agent_name: str, follow: bool=True, interval: float=0.5, base_path: Path | None=None) -> None:
     """Tail an agent log file.
 
     Args:
@@ -54,40 +39,31 @@ def tail_log(
         base_path: Base path for .spawnd directory (defaults to cwd)
     """
     log_path = get_log_path(run_id, agent_name, base_path)
-
     if not log_path.exists():
-        print(f"Log file not found: {log_path}")
-        print("Waiting for log file to be created...")
-
-        while follow and not log_path.exists():
-            time.sleep(interval)
-
+        _ = print(f'Log file not found: {log_path}')
+        _ = print('Waiting for log file to be created...')
+        while follow and (not log_path.exists()):
+            _ = time.sleep(interval)
         if not log_path.exists():
             return
-
-    # Read initial content
     with open(log_path) as f:
         content = f.read()
-        sys.stdout.write(content)
-        sys.stdout.flush()
-
+        _ = sys.stdout.write(content)
+        _ = sys.stdout.flush()
         if not follow:
             return
-
-        # Follow mode
         try:
             while True:
                 line = f.readline()
                 if line:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    _ = sys.stdout.write(line)
+                    _ = sys.stdout.flush()
                 else:
-                    time.sleep(interval)
+                    _ = time.sleep(interval)
         except KeyboardInterrupt:
-            print("\n")
+            _ = print('\n')
 
-
-def list_logs(run_id: str, base_path: Path | None = None) -> list[str]:
+def list_logs(run_id: str, base_path: Path | None=None) -> list[str]:
     """List available log files for a run.
 
     Args:
@@ -98,14 +74,11 @@ def list_logs(run_id: str, base_path: Path | None = None) -> list[str]:
         List of agent names with logs
     """
     log_dir = get_logs_dir(run_id, base_path)
-
     if not log_dir.exists():
         return []
+    return [p.stem for p in log_dir.glob('*.log')]
 
-    return [p.stem for p in log_dir.glob("*.log")]
-
-
-def read_all_logs(run_id: str, interleaved: bool = False, base_path: Path | None = None) -> str:
+def read_all_logs(run_id: str, interleaved: bool=False, base_path: Path | None=None) -> str:
     """Read all logs for a run.
 
     Args:
@@ -117,34 +90,24 @@ def read_all_logs(run_id: str, interleaved: bool = False, base_path: Path | None
         Combined log content
     """
     agent_names = list_logs(run_id, base_path)
-
     if not agent_names:
-        return "No logs found"
-
+        return 'No logs found'
     if not interleaved:
-        # Concatenate logs
         output = []
         for name in sorted(agent_names):
-            output.append(f"\n{'='*60}\n{name}\n{'='*60}\n")
-            output.append(read_log(run_id, name, base_path=base_path))
-        return "".join(output)
-
-    # Interleave by timestamp (simplified - assumes ISO timestamp prefix)
+            _ = output.append(f"\n{'=' * 60}\n{name}\n{'=' * 60}\n")
+            _ = output.append(read_log(run_id, name, base_path=base_path))
+        return ''.join(output)
     entries = []
     for name in agent_names:
         content = read_log(run_id, name, base_path=base_path)
-        for line in content.split("\n"):
+        for line in content.split('\n'):
             if line.strip():
-                entries.append((name, line))
+                _ = entries.append((name, line))
+    _ = entries.sort(key=lambda x: x[1])
+    return '\n'.join((f'[{name}] {line}' for name, line in entries))
 
-    # Sort by timestamp in line (if present)
-    # This is a simplified implementation
-    entries.sort(key=lambda x: x[1])
-
-    return "\n".join(f"[{name}] {line}" for name, line in entries)
-
-
-def setup_logging(run_id: str, verbose: bool = False, base_path: Path | None = None) -> None:
+def setup_logging(run_id: str, verbose: bool=False, base_path: Path | None=None) -> None:
     """Set up logging for a run.
 
     Args:
@@ -153,32 +116,19 @@ def setup_logging(run_id: str, verbose: bool = False, base_path: Path | None = N
         base_path: Base path for .spawnd directory (defaults to cwd)
     """
     log_dir = get_logs_dir(run_id, base_path)
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    # Root logger
-    root = logging.getLogger("spawnd")
-    root.setLevel(logging.DEBUG if verbose else logging.INFO)
-
-    # File handler for main log
-    main_log = log_dir / "spawnd.log"
+    _ = log_dir.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger('spawnd')
+    _ = root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    main_log = log_dir / 'spawnd.log'
     file_handler = logging.FileHandler(main_log)
-    file_handler.setFormatter(logging.Formatter(
-        "[%(asctime)s] %(levelname)-5s [%(name)s] %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    root.addHandler(file_handler)
-
-    # Console handler
+    _ = file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)-5s [%(name)s] %(message)s', datefmt='%H:%M:%S'))
+    _ = root.addHandler(file_handler)
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(logging.Formatter(
-        "[%(asctime)s] %(levelname)-5s %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    root.addHandler(console_handler)
+    _ = console_handler.setLevel(logging.INFO)
+    _ = console_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)-5s %(message)s', datefmt='%H:%M:%S'))
+    _ = root.addHandler(console_handler)
 
-
-def log_to_agent_file(run_id: str, agent_name: str, text: str, base_path: Path | None = None) -> None:
+def log_to_agent_file(run_id: str, agent_name: str, text: str, base_path: Path | None=None) -> None:
     """Append text to agent log file.
 
     Args:
@@ -188,7 +138,6 @@ def log_to_agent_file(run_id: str, agent_name: str, text: str, base_path: Path |
         base_path: Base path for .spawnd directory (defaults to cwd)
     """
     log_path = ensure_log_file(run_id, agent_name, base_path)
-
-    with open(log_path, "a") as f:
+    with open(log_path, 'a') as f:
         timestamp = datetime.now().isoformat()
-        f.write(f"[{timestamp}] {text}\n")
+        _ = f.write(f'[{timestamp}] {text}\n')

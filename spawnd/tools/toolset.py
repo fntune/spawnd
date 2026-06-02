@@ -6,40 +6,12 @@ OpenAI executor expands it into ``Agent(tools=[...])``. Manager vs worker
 is a toolset difference (which coord ops are allowed), not an executor
 difference.
 """
-
 from __future__ import annotations
-
 from dataclasses import dataclass, field
-
-
-# Default "coding" tools for Claude (the MCP-native names).
-DEFAULT_CODE_TOOLS: list[str] = [
-    "Read",
-    "Write",
-    "Edit",
-    "Bash",
-    "Glob",
-    "Grep",
-]
-
-READONLY_CODE_TOOLS: list[str] = ["Read", "Glob", "Grep"]
-
-WORKER_COORD_OPS: list[str] = [
-    "mark_complete",
-    "request_clarification",
-    "report_progress",
-    "report_blocker",
-]
-
-MANAGER_COORD_OPS: list[str] = [
-    "spawn_worker",
-    "respond_to_clarification",
-    "cancel_worker",
-    "get_worker_status",
-    "get_pending_clarifications",
-    "mark_plan_complete",
-]
-
+DEFAULT_CODE_TOOLS: list[str] = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
+READONLY_CODE_TOOLS: list[str] = ['Read', 'Glob', 'Grep']
+WORKER_COORD_OPS: list[str] = ['mark_complete', 'request_clarification', 'report_progress', 'report_blocker']
+MANAGER_COORD_OPS: list[str] = ['spawn_worker', 'respond_to_clarification', 'cancel_worker', 'get_worker_status', 'get_pending_clarifications', 'mark_plan_complete']
 
 @dataclass(frozen=True)
 class Toolset:
@@ -60,36 +32,21 @@ class Toolset:
         role: optional role name (``implementer`` / ``reviewer`` / ...)
             for logging and introspection.
     """
-
     coord: list[str] = field(default_factory=list)
     code: list[str] = field(default_factory=lambda: list(DEFAULT_CODE_TOOLS))
     write_allowed: bool = True
-    system_prompt: str = ""
+    system_prompt: str = ''
     role: str | None = None
 
-
-def worker_toolset(*, write_allowed: bool = True, system_prompt: str = "", role: str | None = None) -> Toolset:
+def worker_toolset(*, write_allowed: bool=True, system_prompt: str='', role: str | None=None) -> Toolset:
     """Default toolset for a worker agent."""
     code = list(DEFAULT_CODE_TOOLS) if write_allowed else list(READONLY_CODE_TOOLS)
-    return Toolset(
-        coord=list(WORKER_COORD_OPS),
-        code=code,
-        write_allowed=write_allowed,
-        system_prompt=system_prompt,
-        role=role,
-    )
+    return Toolset(coord=list(WORKER_COORD_OPS), code=code, write_allowed=write_allowed, system_prompt=system_prompt, role=role)
 
-
-def manager_toolset(*, system_prompt: str = "", role: str | None = None) -> Toolset:
+def manager_toolset(*, system_prompt: str='', role: str | None=None) -> Toolset:
     """Default toolset for a manager agent.
 
     Managers get the code tools (so they can read state themselves) plus
     the manager coord ops for spawning / steering workers.
     """
-    return Toolset(
-        coord=list(MANAGER_COORD_OPS),
-        code=list(DEFAULT_CODE_TOOLS),
-        write_allowed=True,
-        system_prompt=system_prompt,
-        role=role,
-    )
+    return Toolset(coord=list(MANAGER_COORD_OPS), code=list(DEFAULT_CODE_TOOLS), write_allowed=True, system_prompt=system_prompt, role=role)

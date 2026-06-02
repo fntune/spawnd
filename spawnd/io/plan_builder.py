@@ -1,17 +1,12 @@
 """Inline plan creation and context loading for spawnd.dev."""
-
 import logging
 import re
 from pathlib import Path
 from uuid import uuid4
-
 from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
-
-logger = logging.getLogger("spawnd.plan_builder")
-
+logger = logging.getLogger('spawnd.plan_builder')
 MAX_HIERARCHY_DEPTH = 10
-EXPLICIT_AGENT_PATTERN = re.compile(r"^(?P<name>[A-Za-z0-9_.-]+)\s*:\s*(?P<prompt>.+)$")
-
+EXPLICIT_AGENT_PATTERN = re.compile('^(?P<name>[A-Za-z0-9_.-]+)\\s*:\\s*(?P<prompt>.+)$')
 
 def infer_agent_name(prompt: str) -> str:
     """Extract key term from prompt for agent name.
@@ -22,20 +17,12 @@ def infer_agent_name(prompt: str) -> str:
     Returns:
         Inferred name
     """
-    # Common patterns: "Implement X", "Add X", "Fix X", "Refactor X"
-    patterns = [
-        r"(?:implement|add|create|build)\s+(\w+)",
-        r"(?:fix|resolve|debug)\s+(\w+)",
-        r"(?:refactor|update|improve)\s+(\w+)",
-    ]
+    patterns = ['(?:implement|add|create|build)\\s+(\\w+)', '(?:fix|resolve|debug)\\s+(\\w+)', '(?:refactor|update|improve)\\s+(\\w+)']
     for pattern in patterns:
-        if match := re.search(pattern, prompt, re.I):
+        if (match := re.search(pattern, prompt, re.I)):
             return match.group(1).lower()
-
-    # Fallback: first significant word
     words = [w for w in prompt.split() if len(w) > 3]
-    return words[0].lower() if words else f"task-{uuid4().hex[:6]}"
-
+    return words[0].lower() if words else f'task-{uuid4().hex[:6]}'
 
 def parse_inline_agents(prompts: list[str]) -> list[AgentSpec]:
     """Parse inline agent definitions from -p flags.
@@ -51,28 +38,18 @@ def parse_inline_agents(prompts: list[str]) -> list[AgentSpec]:
         List of AgentSpec
     """
     agents = []
-
     for prompt in prompts:
         match = EXPLICIT_AGENT_PATTERN.match(prompt)
-        if match and not prompt.startswith("http"):
-            # "name: prompt" format
-            name = match.group("name")
-            prompt_text = match.group("prompt").strip()
+        if match and (not prompt.startswith('http')):
+            name = match.group('name')
+            prompt_text = match.group('prompt').strip()
         else:
-            # Infer name from prompt
             name = infer_agent_name(prompt)
             prompt_text = prompt
-
-        agents.append(AgentSpec(name=name, prompt=prompt_text))
-
+        _ = agents.append(AgentSpec(name=name, prompt=prompt_text))
     return agents
 
-
-def create_inline_plan(
-    prompts: list[str],
-    sequential: bool = False,
-    defaults: Defaults | None = None,
-) -> PlanSpec:
+def create_inline_plan(prompts: list[str], sequential: bool=False, defaults: Defaults | None=None) -> PlanSpec:
     """Create a plan from inline prompts.
 
     Args:
@@ -84,24 +61,12 @@ def create_inline_plan(
         PlanSpec
     """
     agents = parse_inline_agents(prompts)
-
-    # Add sequential dependencies if requested
     if sequential and len(agents) > 1:
         for i in range(1, len(agents)):
             agents[i].depends_on = [agents[i - 1].name]
+    return PlanSpec(name=f'inline-{uuid4().hex[:8]}', defaults=defaults or Defaults(), agents=agents)
 
-    return PlanSpec(
-        name=f"inline-{uuid4().hex[:8]}",
-        defaults=defaults or Defaults(),
-        agents=agents,
-    )
-
-
-def expand_pattern_agents(
-    pattern: str,
-    prompt_template: str,
-    base_path: Path | None = None,
-) -> list[AgentSpec]:
+def expand_pattern_agents(pattern: str, prompt_template: str, base_path: Path | None=None) -> list[AgentSpec]:
     """Expand a glob pattern to multiple agents.
 
     Args:
@@ -114,17 +79,14 @@ def expand_pattern_agents(
     """
     base = base_path or Path.cwd()
     files = list(base.glob(pattern))
-
     agents = []
     for file in files:
-        name = file.stem.lower().replace("_", "-")
+        name = file.stem.lower().replace('_', '-')
         prompt = prompt_template.format(file=str(file))
-        agents.append(AgentSpec(name=name, prompt=prompt))
-
+        _ = agents.append(AgentSpec(name=name, prompt=prompt))
     return agents
 
-
-def load_shared_context(paths: list[str], base_path: Path | None = None) -> str:
+def load_shared_context(paths: list[str], base_path: Path | None=None) -> str:
     """Load shared context files.
 
     Args:
@@ -136,12 +98,10 @@ def load_shared_context(paths: list[str], base_path: Path | None = None) -> str:
     """
     base = base_path or Path.cwd()
     contents = []
-
     for path in paths:
         full_path = base / path
         if full_path.exists():
-            contents.append(f"--- {path} ---\n{full_path.read_text()}")
+            _ = contents.append(f'--- {path} ---\n{full_path.read_text()}')
         else:
-            logger.warning(f"Shared context file not found: {path}")
-
-    return "\n\n".join(contents)
+            _ = logger.warning(f'Shared context file not found: {path}')
+    return '\n\n'.join(contents)

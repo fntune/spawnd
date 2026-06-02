@@ -1,12 +1,8 @@
 """Dependency resolution for spawnd.dev."""
-
 import logging
 from typing import Iterator
-
 from spawnd.models.specs import AgentSpec
-
-logger = logging.getLogger("spawnd.deps")
-
+logger = logging.getLogger('spawnd.deps')
 
 class DependencyGraph:
     """Manages agent dependencies."""
@@ -32,13 +28,11 @@ class DependencyGraph:
         """
         ready = []
         terminal = completed | failed
-
         for name, deps in self.deps.items():
             if name in terminal:
                 continue
             if deps.issubset(completed):
-                ready.append(self.agents[name])
-
+                _ = ready.append(self.agents[name])
         return ready
 
     def get_blocked_by_failure(self, failed: set[str]) -> list[str]:
@@ -52,8 +46,8 @@ class DependencyGraph:
         """
         blocked = []
         for name, deps in self.deps.items():
-            if deps & failed:  # Has any failed deps
-                blocked.append(name)
+            if deps & failed:
+                _ = blocked.append(name)
         return blocked
 
     def topological_order(self) -> list[str]:
@@ -68,19 +62,16 @@ class DependencyGraph:
         in_degree = {n: len(d) for n, d in self.deps.items()}
         queue = [n for n, d in in_degree.items() if d == 0]
         order = []
-
         while queue:
             node = queue.pop(0)
-            order.append(node)
+            _ = order.append(node)
             for name, deps in self.deps.items():
                 if node in deps:
                     in_degree[name] -= 1
                     if in_degree[name] == 0:
-                        queue.append(name)
-
+                        _ = queue.append(name)
         if len(order) != len(self.agents):
-            raise ValueError("Circular dependency detected")
-
+            raise ValueError('Circular dependency detected')
         return order
 
     def reverse_topological_order(self) -> list[str]:
@@ -105,7 +96,7 @@ class DependencyGraph:
         dependents = []
         for agent_name, deps in self.deps.items():
             if name in deps:
-                dependents.append(agent_name)
+                _ = dependents.append(agent_name)
         return dependents
 
     def get_subtree(self, name: str) -> set[str]:
@@ -121,14 +112,12 @@ class DependencyGraph:
         """
         subtree = {name}
         queue = [name]
-
         while queue:
             current = queue.pop(0)
             for dependent in self.get_dependents(current):
                 if dependent not in subtree:
-                    subtree.add(dependent)
-                    queue.append(dependent)
-
+                    _ = subtree.add(dependent)
+                    _ = queue.append(dependent)
         return subtree
 
     def iter_layers(self) -> Iterator[list[str]]:
@@ -142,20 +131,12 @@ class DependencyGraph:
         """
         remaining = set(self.agents.keys())
         completed = set()
-
         while remaining:
-            # Find agents with all deps satisfied
-            layer = [
-                name for name in remaining
-                if self.deps[name].issubset(completed)
-            ]
-
+            layer = [name for name in remaining if self.deps[name].issubset(completed)]
             if not layer:
-                raise ValueError("Circular dependency detected")
-
+                raise ValueError('Circular dependency detected')
             yield layer
-
-            completed.update(layer)
+            _ = completed.update(layer)
             remaining -= set(layer)
 
     def validate(self) -> list[str]:
@@ -165,22 +146,16 @@ class DependencyGraph:
             List of validation errors (empty if valid)
         """
         errors = []
-
-        # Check for unknown dependencies
         all_names = set(self.agents.keys())
         for name, deps in self.deps.items():
             unknown = deps - all_names
             if unknown:
-                errors.append(f"Agent {name} depends on unknown agents: {unknown}")
-
-        # Check for circular dependencies
+                _ = errors.append(f'Agent {name} depends on unknown agents: {unknown}')
         try:
-            self.topological_order()
+            _ = self.topological_order()
         except ValueError:
-            errors.append("Circular dependency detected")
-
+            _ = errors.append('Circular dependency detected')
         return errors
-
 
 def resolve_dependencies(agents: list[AgentSpec]) -> list[list[str]]:
     """Resolve dependencies into execution layers.
@@ -194,7 +169,6 @@ def resolve_dependencies(agents: list[AgentSpec]) -> list[list[str]]:
     """
     graph = DependencyGraph(agents)
     return list(graph.iter_layers())
-
 
 def get_merge_order(agents: list[AgentSpec]) -> list[str]:
     """Get the order for merging agent branches.
