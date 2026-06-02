@@ -1,6 +1,6 @@
 # spawnd.dev
 
-> Multi-agent orchestration for Claude Code. Parallel worktrees. Resumable runs.
+> Multi-agent orchestration for coding agents. Parallel worktrees. Resumable runs.
 
 ```bash
 spawnd run -f plan.yaml
@@ -14,7 +14,7 @@ Write a YAML plan. Spawnd resolves dependencies, spawns agents in isolated git w
 
 ## Why
 
-Chaining Claude sessions by hand doesn't scale. Copy-pasting outputs between windows, manually rebasing branches, losing all context when a session dies — this is friction that shouldn't exist.
+Chaining coding-agent sessions by hand doesn't scale. Copy-pasting outputs between windows, manually rebasing branches, losing all context when a session dies — this is friction that shouldn't exist.
 
 Spawnd treats multi-agent work as a **data structure**: a plan spec with named agents, dependency edges, and completion conditions. Every run is tracked, every branch is isolated, every failure is recoverable.
 
@@ -29,9 +29,12 @@ Spawnd treats multi-agent work as a **data structure**: a plan spec with named a
 ## Installation
 
 ```bash
-pip install -e ".[sdk]"   # with Claude Agent SDK
-pip install -e .           # without (use --mock for dry runs)
+pip install -e .            # without SDKs (use --mock for dry runs)
+pip install -e ".[sdk]"     # with Claude Agent SDK
+pip install -e ".[openai]"  # with OpenAI Agents SDK
 ```
+
+The Codex runtime uses the external Codex CLI instead of a Python package. Install/repair the CLI separately and verify it with `codex doctor`.
 
 ---
 
@@ -130,6 +133,14 @@ name: plan-name
 defaults:
   model: sonnet          # claude-sonnet-4-6 by default
   on_failure: continue   # continue | stop | retry
+  runtime: claude        # claude | openai | codex
+orchestration:
+  worktree_source:
+    fetch: true
+    base_ref: origin/HEAD
+  worktree_setup:
+    command: bash scripts/worktree/setup.sh
+    timeout_seconds: 600
 
 agents:
   - name: agent-name
@@ -139,9 +150,24 @@ agents:
     check: "pytest tests/"      # shell command; must exit 0
     on_failure: retry           # override per-agent
     model: opus                 # override per-agent
+    runtime: codex              # override per-agent
 ```
 
 Agents with no `depends_on` run immediately in parallel. Agents with `depends_on` wait until all listed agents complete.
+When `orchestration.worktree_source.fetch` is enabled, spawnd runs `git fetch --prune origin` before creating each agent worktree. `base_ref` is passed to `git worktree add`, so `origin/HEAD` starts agents from the fetched default branch instead of the operator's current checkout.
+When `orchestration.worktree_setup` is configured, the command runs in each agent worktree before the runtime starts. It receives `SPAWND_SOURCE_TREE_PATH`, `SPAWND_WORKTREE_PATH`, `WORKTREE_PRIMARY`, `CODEX_SOURCE_TREE_PATH`, and `CODEX_WORKTREE_PATH`; a nonzero exit fails the agent without launching it.
+
+---
+
+## Runtimes
+
+| Runtime | Backend | Default model | Notes |
+|---------|---------|---------------|-------|
+| `claude` | Claude Agent SDK | `sonnet` | Supports worker and manager agents with spawnd coordination tools. |
+| `openai` | OpenAI Agents SDK | `gpt-5` | Supports worker and manager agents; cost is estimated from token usage. |
+| `codex` | Codex CLI (`codex exec`) | `gpt-5` | Worker-only for now; uses the documented non-interactive CLI path. |
+
+Codex is launched as `codex exec --cd <worktree> --output-last-message <file> ... <prompt>`. By default spawnd adds `--ephemeral` and `--sandbox workspace-write`. Override with `SPAWND_CODEX_BIN`, `SPAWND_CODEX_SANDBOX`, `SPAWND_CODEX_EPHEMERAL`, `SPAWND_CODEX_DANGEROUS_BYPASS`, or `SPAWND_CODEX_EXTRA_ARGS` in the agent env. `codex app-server` and `exec-server` are lower-level experimental server surfaces, so they are not the default executor path.
 
 ---
 
@@ -196,6 +222,7 @@ spawnd resolves dependency graph (topological sort)
                 ▼
         each agent runs with:
           - its own git worktree (branch: agent-{name})
+          - optional worktree setup command, run before the agent starts
           - worker tool set: mark_complete, request_clarification,
                              report_progress, report_blocker
                 │
@@ -207,7 +234,7 @@ spawnd resolves dependency graph (topological sort)
 spawnd merge: consolidate branches → resolve conflicts → done
 ```
 
-Manager agents (type: manager) run with a direct API loop — full context control, can spawn subagents and read worker events before each turn. Worker agents run via the SDK Agent class for autonomous task execution.
+Manager agents (type: manager) run with a direct SDK loop where the selected runtime supports spawnd coordination tools. Worker agents run through the selected runtime executor for autonomous task execution. Codex currently supports worker agents only.
 
 ---
 

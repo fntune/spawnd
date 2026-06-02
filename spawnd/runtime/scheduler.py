@@ -35,7 +35,7 @@ from spawnd.runtime.policies.circuit_breaker import apply_circuit_breaker_policy
 from spawnd.runtime.policies.failure import apply_failure_policy
 from spawnd.runtime.policies.stuck import evaluate_stuck_run
 from spawnd.runtime.task_registry import CancellationRegistry, get_default_registry
-from spawnd.gitops.worktrees import create_worktree, setup_worktree_with_deps
+from spawnd.gitops.worktrees import create_worktree, get_repo_root, run_worktree_setup, setup_worktree_with_deps
 from spawnd.models.specs import PlanSpec
 from spawnd.io.plan_builder import load_shared_context
 from spawnd.io.parser import generate_run_id
@@ -46,6 +46,11 @@ logger = logging.getLogger("spawnd.scheduler")
 # Scheduler constants
 STUCK_THRESHOLD_ITERATIONS = 30
 POLL_INTERVAL_SECONDS = 1.0
+
+
+async def _failed_spawn_result(error: str) -> dict:
+    """Return a task-shaped failed spawn result without launching an agent."""
+    return {"success": False, "status": "failed", "error": error}
 
 
 @dataclass
@@ -198,8 +203,15 @@ class Scheduler:
         name = agent_row["name"]
         agent_type = agent_row["type"] or "worker"
 
+        source = self.plan.orchestration.worktree_source if self.plan.orchestration else None
+
         # Create worktree
-        worktree_path = create_worktree(self.run_id, name)
+        worktree_path = create_worktree(
+            self.run_id,
+            name,
+            base_ref=source.base_ref if source else None,
+            fetch=source.fetch if source else False,
+        )
 
         # Merge dependencies
         depends_on = json.loads(agent_row["depends_on"] or "[]")
@@ -236,6 +248,57 @@ class Scheduler:
             prompt = f"{prompt}\n\n{error_context}"
 
         hydrated = hydrate_agent_runtime_config(agent_row, prompt)
+
+        setup = self.plan.orchestration.worktree_setup if self.plan.orchestration else None
+        if setup:
+            source_path = get_repo_root()
+            setup_env = dict(hydrated.env or {})
+            setup_env.update(setup.env)
+            insert_event(
+                self.db,
+                self.run_id,
+                name,
+                "worktree_setup_started",
+                {"command": setup.command},
+            )
+            try:
+                result = run_worktree_setup(
+                    worktree_path,
+                    source_path,
+                    setup.command,
+                    env=setup_env,
+                    timeout_seconds=setup.timeout_seconds,
+                )
+            except Exception as exc:
+                error = str(exc)
+                transition_agent_status(
+                    self.db,
+                    self.run_id,
+                    name,
+                    "failed",
+                    error,
+                    current_status=agent_row["status"],
+                    force=True,
+                )
+                insert_event(
+                    self.db,
+                    self.run_id,
+                    name,
+                    "worktree_setup_failed",
+                    {"error": error},
+                )
+                return asyncio.create_task(_failed_spawn_result(error), name=f"setup-failed-{name}")
+
+            insert_event(
+                self.db,
+                self.run_id,
+                name,
+                "worktree_setup_completed",
+                {
+                    "stdout": result.stdout[-2000:],
+                    "stderr": result.stderr[-2000:],
+                },
+            )
 
         # Build config
         config = AgentConfig(

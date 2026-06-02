@@ -3,6 +3,7 @@
 import pytest
 
 from spawnd.runtime.executors import claude as _claude_executor_module  # noqa: F401
+from spawnd.runtime.executors import codex as _codex_executor_module  # noqa: F401
 from spawnd.runtime.executors.base import (
     EXECUTOR_REGISTRY,
     Executor,
@@ -15,6 +16,12 @@ from spawnd.runtime.executors.base import (
 def test_claude_executor_is_registered():
     ex = get_executor("claude")
     assert ex.runtime == "claude"
+    assert isinstance(ex, Executor)
+
+
+def test_codex_executor_is_registered():
+    ex = get_executor("codex")
+    assert ex.runtime == "codex"
     assert isinstance(ex, Executor)
 
 

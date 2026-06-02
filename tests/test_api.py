@@ -91,6 +91,24 @@ async def test_run_with_explicit_run_id(spawnd_env):
 
 
 @pytest.mark.asyncio
+async def test_api_accepts_codex_runtime_on_agentspec(spawnd_env):
+    result = await run(
+        [agent("codex", "task", check="true", runtime="codex")],
+        name="codex-runtime",
+        use_mock=True,
+    )
+
+    assert result.success is True
+    with get_db(result.run_id) as db:
+        row = db.execute(
+            "SELECT runtime, cost_source FROM agents WHERE run_id = ? AND name = ?",
+            (result.run_id, "codex"),
+        ).fetchone()
+    assert row["runtime"] == "codex"
+    assert row["cost_source"] == "codex-cli"
+
+
+@pytest.mark.asyncio
 async def test_run_with_dependency_runs_both(spawnd_env):
     result = await run(
         [

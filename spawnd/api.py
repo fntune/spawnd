@@ -9,7 +9,7 @@ same SQLite database under ``.spawnd/runs/<run_id>/``, same worktrees, same
 from typing import Literal
 
 from spawnd.io.validation import validate_plan
-from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
+from spawnd.models.specs import AgentSpec, Defaults, PlanSpec, RuntimeName
 from spawnd.runtime.run_state import run_has_persisted_plan
 from spawnd.runtime.scheduler import SchedulerResult, run_plan
 from spawnd.storage.logs import setup_logging
@@ -30,7 +30,7 @@ def agent(
     max_cost_usd: float | None = None,
     on_failure: Literal["continue", "stop", "retry"] | None = None,
     retry_count: int | None = None,
-    runtime: Literal["claude", "openai"] | None = None,
+    runtime: RuntimeName | None = None,
     env: dict[str, str] | None = None,
 ) -> AgentSpec:
     """Build an ``AgentSpec`` with Python-friendly keyword arguments.

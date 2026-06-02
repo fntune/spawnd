@@ -11,6 +11,7 @@ from spawnd.gitops.worktrees import (
     merge_branch_to_current,
     remove_worktree,
     run_git,
+    run_worktree_setup,
     setup_worktree_with_deps,
 )
 
@@ -67,6 +68,44 @@ def test_create_worktree_reuse_existing(git_repo, monkeypatch):
     # Should be same path and file should still exist
     assert worktree_path1 == worktree_path2
     assert (worktree_path2 / "test_file.txt").read_text() == "test content"
+
+
+def test_create_worktree_from_base_ref(git_repo, monkeypatch):
+    """Worktrees can be created from an explicit base ref."""
+    monkeypatch.chdir(git_repo)
+
+    subprocess.run(["git", "checkout", "-b", "base"], cwd=git_repo, check=True, capture_output=True)
+    (git_repo / "base.txt").write_text("base")
+    subprocess.run(["git", "add", "base.txt"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Add base file"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-"], cwd=git_repo, check=True, capture_output=True)
+
+    worktree_path = create_worktree("test-run-base", "agent1", git_repo, base_ref="base")
+
+    assert (worktree_path / "base.txt").read_text() == "base"
+
+
+def test_run_worktree_setup_exposes_source_and_worktree_paths(git_repo, monkeypatch):
+    """Setup commands should get explicit source/worktree path variables."""
+    monkeypatch.chdir(git_repo)
+
+    worktree_path = create_worktree("test-run-setup", "agent1", git_repo)
+    run_worktree_setup(
+        worktree_path,
+        git_repo,
+        "printf '%s\n%s\n%s\n%s\n%s\n' "
+        '"$SPAWND_SOURCE_TREE_PATH" "$SPAWND_WORKTREE_PATH" "$WORKTREE_PRIMARY" '
+        '"$CODEX_SOURCE_TREE_PATH" "$CODEX_WORKTREE_PATH" > setup.paths',
+    )
+
+    lines = (worktree_path / "setup.paths").read_text().splitlines()
+    assert lines == [
+        str(git_repo.resolve()),
+        str(worktree_path.resolve()),
+        str(git_repo.resolve()),
+        str(git_repo.resolve()),
+        str(worktree_path.resolve()),
+    ]
 
 
 def test_remove_worktree(git_repo, monkeypatch):

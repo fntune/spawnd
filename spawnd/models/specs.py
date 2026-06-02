@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 AGENT_NAME_PATTERN = r"^[A-Za-z0-9_.-]+$"
+RuntimeName = Literal["claude", "openai", "codex"]
 
 
 class RunConfig(BaseModel):
@@ -23,7 +24,7 @@ class Defaults(BaseModel):
     retry_count: int = 3
     model: str = "sonnet"
     max_cost_usd: float = 5.0
-    runtime: Literal["claude", "openai"] = "claude"
+    runtime: RuntimeName = "claude"
 
 
 class CostBudget(BaseModel):
@@ -48,6 +49,21 @@ class DependencyContext(BaseModel):
     exclude_paths: list[str] = Field(default_factory=list)
 
 
+class WorktreeSetup(BaseModel):
+    """Command to prepare each agent worktree before runtime launch."""
+
+    command: str = Field(min_length=1)
+    timeout_seconds: int | None = Field(default=None, gt=0)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class WorktreeSource(BaseModel):
+    """Source revision for new agent worktrees."""
+
+    base_ref: str | None = None
+    fetch: bool = False
+
+
 class MergeConfig(BaseModel):
     """Merge settings."""
 
@@ -66,6 +82,8 @@ class Orchestration(BaseModel):
     event_injection: bool = True
     circuit_breaker: CircuitBreaker | None = None
     dependency_context: DependencyContext | None = None
+    worktree_source: WorktreeSource | None = None
+    worktree_setup: WorktreeSetup | None = None
     merge: MergeConfig | None = None
     stuck_threshold: int | None = None
 
@@ -98,7 +116,7 @@ class AgentSpec(BaseModel):
     retry_count: int | None = None
     model: str | None = None
     max_cost_usd: float | None = None
-    runtime: Literal["claude", "openai"] | None = None
+    runtime: RuntimeName | None = None
     depends_on: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     milestones: list[Milestone] = Field(default_factory=list)

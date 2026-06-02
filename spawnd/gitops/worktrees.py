@@ -1,6 +1,7 @@
 """Git worktree management for spawnd.dev."""
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,12 @@ logger = logging.getLogger("spawnd.git")
 
 class GitError(Exception):
     """Git operation failed."""
+
+    pass
+
+
+class WorktreeSetupError(GitError):
+    """Worktree setup command failed."""
 
     pass
 
@@ -57,6 +64,8 @@ def create_worktree(
     run_id: str,
     agent_name: str,
     repo_path: Path | None = None,
+    base_ref: str | None = None,
+    fetch: bool = False,
 ) -> Path:
     """Create a git worktree for an agent.
 
@@ -81,11 +90,75 @@ def create_worktree(
 
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if fetch:
+        run_git(["fetch", "--prune", "origin"], cwd=repo)
+
     # Create worktree with new branch
-    run_git(["worktree", "add", "-b", branch_name, str(worktree_path)], cwd=repo)
+    args = ["worktree", "add", "-b", branch_name, str(worktree_path)]
+    if base_ref:
+        args.append(base_ref)
+    run_git(args, cwd=repo)
     logger.info(f"Created worktree at {worktree_path} on branch {branch_name}")
 
     return worktree_path
+
+
+def _tail(text: str, limit: int = 4000) -> str:
+    """Return the end of command output for diagnostics."""
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def run_worktree_setup(
+    worktree_path: Path,
+    source_path: Path,
+    command: str,
+    *,
+    env: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a setup command in an agent worktree.
+
+    The command receives explicit source/worktree paths so repository-owned
+    bootstrap scripts can copy local-only files and verify setup without
+    guessing linked-worktree internals.
+    """
+    setup_env = os.environ.copy()
+    if env:
+        setup_env.update(env)
+
+    source = str(source_path.resolve())
+    worktree = str(worktree_path.resolve())
+    setup_env.update({
+        "SPAWND_SOURCE_TREE_PATH": source,
+        "SPAWND_WORKTREE_PATH": worktree,
+        # Compatibility with existing repo bootstrap scripts and Codex
+        # local-environment snippets.
+        "WORKTREE_PRIMARY": source,
+        "CODEX_SOURCE_TREE_PATH": source,
+        "CODEX_WORKTREE_PATH": worktree,
+    })
+
+    result = subprocess.run(
+        command,
+        cwd=worktree_path,
+        env=setup_env,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise WorktreeSetupError(
+            "Worktree setup failed "
+            f"(exit {result.returncode}) for {worktree_path}: {command}\n"
+            f"stdout:\n{_tail(result.stdout)}\n"
+            f"stderr:\n{_tail(result.stderr)}"
+        )
+
+    logger.info(f"Ran worktree setup in {worktree_path}")
+    return result
 
 
 def remove_worktree(worktree_path: Path, repo_path: Path | None = None) -> None:

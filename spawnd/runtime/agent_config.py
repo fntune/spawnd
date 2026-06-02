@@ -69,7 +69,13 @@ def resolve_agent_plan_config(agent: AgentSpec, defaults: Defaults) -> ResolvedA
         on_failure=agent.on_failure if agent.on_failure is not None else defaults.on_failure,
         retry_count=agent.retry_count if agent.retry_count is not None else defaults.retry_count,
         runtime=runtime,
-        cost_source="estimated" if runtime == "openai" else "sdk",
+        cost_source=(
+            "estimated"
+            if runtime == "openai"
+            else "codex-cli"
+            if runtime == "codex"
+            else "sdk"
+        ),
         manager_cap=manager_cap,
     )
 

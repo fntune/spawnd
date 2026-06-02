@@ -18,7 +18,16 @@ from spawnd.storage.db import (
     update_agent_status,
     update_plan_status,
 )
-from spawnd.models.specs import AgentSpec, CostBudget, DependencyContext, Orchestration, CircuitBreaker, PlanSpec
+from spawnd.models.specs import (
+    AgentSpec,
+    CircuitBreaker,
+    CostBudget,
+    DependencyContext,
+    Orchestration,
+    PlanSpec,
+    WorktreeSetup,
+    WorktreeSource,
+)
 from spawnd.runtime.scheduler import Scheduler, SchedulerResult
 
 
@@ -265,6 +274,119 @@ async def test_spawn_agent_propagates_agentspec_env(temp_spawnd_dir, monkeypatch
     await scheduler._spawn_agent(agent_row)
 
     assert captured["env"] == {"MY_FLAG": "1", "TOKEN": "t"}
+
+    scheduler.db.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_runs_worktree_setup_before_worker(temp_spawnd_dir, monkeypatch):
+    """Configured setup should run before the worker runtime starts."""
+    monkeypatch.chdir(temp_spawnd_dir)
+
+    worktree = temp_spawnd_dir / "worktree"
+    worktree.mkdir()
+    orchestration = Orchestration(
+        worktree_setup=WorktreeSetup(command="printf ran > setup.ok"),
+    )
+    plan = create_test_plan([AgentSpec(name="a", prompt="Task A")], orchestration=orchestration)
+
+    scheduler = Scheduler(plan, run_id="test-run-worktree-setup", use_mock=True)
+    scheduler._init_db()
+
+    agent_row = get_agent(scheduler.db, "test-run-worktree-setup", "a")
+    captured: dict = {}
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.get_repo_root", lambda *args, **kwargs: temp_spawnd_dir)
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", lambda *args, **kwargs: worktree)
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *args, **kwargs: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *args, **kwargs: None)
+
+    def fake_spawn_worker(config, use_mock=False):
+        captured["setup_exists"] = (config.worktree / "setup.ok").exists()
+        return "task"
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", fake_spawn_worker)
+
+    await scheduler._spawn_agent(agent_row)
+
+    assert captured["setup_exists"] is True
+    assert (worktree / "setup.ok").read_text() == "ran"
+
+    scheduler.db.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_passes_worktree_source_config(temp_spawnd_dir, monkeypatch):
+    """Worktree source config should control branch creation."""
+    monkeypatch.chdir(temp_spawnd_dir)
+
+    orchestration = Orchestration(
+        worktree_source=WorktreeSource(base_ref="origin/HEAD", fetch=True),
+    )
+    plan = create_test_plan([AgentSpec(name="a", prompt="Task A")], orchestration=orchestration)
+    scheduler = Scheduler(plan, run_id="test-run-worktree-source", use_mock=True)
+    scheduler._init_db()
+
+    agent_row = get_agent(scheduler.db, "test-run-worktree-source", "a")
+    captured: dict = {}
+
+    def fake_create_worktree(*args, **kwargs):
+        captured["base_ref"] = kwargs.get("base_ref")
+        captured["fetch"] = kwargs.get("fetch")
+        return temp_spawnd_dir / "worktree"
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", fake_create_worktree)
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *args, **kwargs: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *args, **kwargs: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", lambda *args, **kwargs: "task")
+
+    await scheduler._spawn_agent(agent_row)
+
+    assert captured == {"base_ref": "origin/HEAD", "fetch": True}
+
+    scheduler.db.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_fails_closed_when_worktree_setup_fails(temp_spawnd_dir, monkeypatch):
+    """A failing setup command should fail the agent without launching runtime."""
+    monkeypatch.chdir(temp_spawnd_dir)
+
+    worktree = temp_spawnd_dir / "worktree"
+    worktree.mkdir()
+    orchestration = Orchestration(
+        worktree_setup=WorktreeSetup(command="printf bad >&2; exit 7"),
+    )
+    plan = create_test_plan([AgentSpec(name="a", prompt="Task A")], orchestration=orchestration)
+
+    scheduler = Scheduler(plan, run_id="test-run-worktree-setup-fails", use_mock=True)
+    scheduler._init_db()
+
+    agent_row = get_agent(scheduler.db, "test-run-worktree-setup-fails", "a")
+    spawned = {"worker": False}
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.get_repo_root", lambda *args, **kwargs: temp_spawnd_dir)
+    monkeypatch.setattr("spawnd.runtime.scheduler.create_worktree", lambda *args, **kwargs: worktree)
+    monkeypatch.setattr("spawnd.runtime.scheduler.update_agent_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr("spawnd.runtime.scheduler.load_shared_context", lambda *args, **kwargs: "")
+    monkeypatch.setattr("spawnd.runtime.scheduler.setup_worktree_with_deps", lambda *args, **kwargs: None)
+
+    def fake_spawn_worker(config, use_mock=False):
+        spawned["worker"] = True
+        return "task"
+
+    monkeypatch.setattr("spawnd.runtime.scheduler.spawn_worker", fake_spawn_worker)
+
+    task = await scheduler._spawn_agent(agent_row)
+    result = await task
+    failed = get_agent(scheduler.db, "test-run-worktree-setup-fails", "a")
+
+    assert spawned["worker"] is False
+    assert result["status"] == "failed"
+    assert failed["status"] == "failed"
+    assert "exit 7" in failed["error"]
 
     scheduler.db.close()
 

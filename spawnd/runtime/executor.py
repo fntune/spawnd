@@ -12,8 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# Side-effect import: registers ClaudeExecutor (and OpenAIExecutor if the
-# optional extra is installed) in the executor registry.
+# Side-effect import: registers bundled executors in the executor registry.
 from spawnd.runtime import executors as _executors  # pyright: ignore[reportUnusedImport] # noqa: F401
 from spawnd.runtime.executors.base import get_executor
 from spawnd.storage.db import (

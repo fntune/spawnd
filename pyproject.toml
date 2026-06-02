@@ -1,7 +1,7 @@
 [project]
 name = "spawnd.dev"
 version = "0.1.0"
-description = "Multi-agent orchestration framework for Claude Code"
+description = "Multi-agent orchestration framework for coding agents"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0",
@@ -34,3 +34,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["spawnd"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+pythonPlatform = "All"
+include = ["."]
+exclude = ["venv", ".venv", ".spawnd", ".swarm"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportMissingTypeArgument = false
+reportUntypedFunctionDecorator = false

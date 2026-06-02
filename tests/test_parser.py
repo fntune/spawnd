@@ -40,6 +40,55 @@ agents:
     assert plan.agents[1].depends_on == ["first"]
 
 
+def test_parse_plan_yaml_with_worktree_setup():
+    """Parse worktree setup orchestration config."""
+    yaml_content = """
+name: setup-plan
+orchestration:
+  worktree_source:
+    fetch: true
+    base_ref: origin/HEAD
+  worktree_setup:
+    command: bash scripts/worktree/setup.sh
+    timeout_seconds: 120
+    env:
+      WORKTREE_INSTALL_BROWSERS: "0"
+agents:
+  - name: worker1
+    prompt: Do something
+"""
+    plan = parse_plan_yaml(yaml_content)
+
+    assert plan.orchestration is not None
+    assert plan.orchestration.worktree_source is not None
+    assert plan.orchestration.worktree_source.fetch is True
+    assert plan.orchestration.worktree_source.base_ref == "origin/HEAD"
+    assert plan.orchestration.worktree_setup is not None
+    assert plan.orchestration.worktree_setup.command == "bash scripts/worktree/setup.sh"
+    assert plan.orchestration.worktree_setup.timeout_seconds == 120
+    assert plan.orchestration.worktree_setup.env == {"WORKTREE_INSTALL_BROWSERS": "0"}
+
+
+def test_parse_plan_yaml_accepts_codex_runtime():
+    """Codex is a valid runtime at defaults and per-agent scope."""
+    yaml_content = """
+name: codex-plan
+defaults:
+  runtime: codex
+agents:
+  - name: worker1
+    prompt: Do something
+  - name: worker2
+    prompt: Do something else
+    runtime: codex
+"""
+    plan = parse_plan_yaml(yaml_content)
+
+    assert plan.defaults.runtime == "codex"
+    assert plan.agents[0].runtime is None
+    assert plan.agents[1].runtime == "codex"
+
+
 def test_parse_plan_yaml_rejects_invalid_agent_name():
     """Agent names should fail validation before runtime git operations."""
     yaml_content = """

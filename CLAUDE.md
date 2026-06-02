@@ -16,6 +16,7 @@ pip install -e .                  # core
 pip install -e ".[sdk]"           # + Claude Agent SDK
 pip install -e ".[openai]"        # + OpenAI Agents SDK (gpt-5 etc.)
 pip install -e ".[dev]"           # both SDKs + pytest
+# Codex runtime uses the external Codex CLI; verify with `codex doctor`.
 
 # Type + tests
 pyright spawnd/
@@ -90,6 +91,7 @@ spawnd/
 │   └── executors/
 │       ├── base.py          # Executor ABC, EXECUTOR_REGISTRY, get_executor
 │       ├── claude.py        # ClaudeExecutor (runtime="claude")
+│       ├── codex.py         # CodexExecutor (runtime="codex", external Codex CLI)
 │       └── openai.py        # OpenAIExecutor (runtime="openai", optional [openai] extra)
 ├── storage/                 # db.py (SQLite WAL), logs.py, paths.py
 ├── tools/
@@ -110,10 +112,11 @@ Pluggable vendor executors, selected per-agent via `runtime:` (defaults to `clau
 |---|---|---|---|
 | `claude` | `claude-agent-sdk` (`[sdk]`) | `sonnet` | SDK-reported USD (`cost_source="sdk"`) |
 | `openai` | `openai-agents` (`[openai]`) | `gpt-5` | Estimated from tokens × price table (`cost_source="estimated"`) |
+| `codex` | external Codex CLI (`codex exec`) | `gpt-5` | CLI-backed placeholder (`cost_source="codex-cli"`) |
 
-Adapters self-register at `spawnd.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so spawnd works without the `[openai]` extra installed.
+Adapters self-register at `spawnd.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so spawnd works without the `[openai]` extra installed. Codex import is unconditional because it has no Python SDK dependency; the external `codex` binary is required only when an agent actually runs with `runtime: codex`.
 
-Mixed-runtime plans work — dependencies and manager→worker spawn flow across vendors. Manager-spawned children inherit the parent's runtime + cost_source.
+Mixed-runtime plans work across dependency edges. Manager-spawned children inherit the parent's runtime + cost_source. Codex currently supports worker agents only because the executor uses the documented non-interactive `codex exec` path; `codex app-server` / `exec-server` are experimental server surfaces and are not wired to spawnd coordination tools yet.
 
 ## Failure Handling
 
@@ -147,8 +150,14 @@ defaults:
   on_failure: retry
   retry_count: 3
   model: sonnet
-  runtime: claude               # or openai
+  runtime: claude               # claude | openai | codex
 orchestration:
+  worktree_source:
+    fetch: true
+    base_ref: origin/HEAD
+  worktree_setup:
+    command: bash scripts/worktree/setup.sh
+    timeout_seconds: 600
   circuit_breaker: {threshold: 3, action: cancel_all}
 agents:
   - name: auth
@@ -157,9 +166,11 @@ agents:
   - name: review
     prompt: "Review the auth implementation"
     use_role: reviewer
-    runtime: openai              # per-agent override
+    runtime: codex               # per-agent override
     depends_on: [auth]
 ```
+`orchestration.worktree_source.fetch` runs `git fetch --prune origin` before worktree creation. `base_ref` is passed to `git worktree add`, so `origin/HEAD` starts agents from the fetched default branch.
+`orchestration.worktree_setup` runs in each agent worktree before runtime launch. It receives `SPAWND_SOURCE_TREE_PATH`, `SPAWND_WORKTREE_PATH`, `WORKTREE_PRIMARY`, `CODEX_SOURCE_TREE_PATH`, and `CODEX_WORKTREE_PATH`; nonzero exit fails the agent before the selected runtime starts.
 
 ## File Layout
 
@@ -181,6 +192,7 @@ Key columns: `name`, `status`, `type`, `runtime`, `parent`, `vendor_session_id`,
 - `pyyaml>=6.0` — plan parsing
 - `claude-agent-sdk>=0.1.19` (opt `[sdk]`)
 - `openai-agents>=0.6`, `openai>=1.50` (opt `[openai]`)
+- External `codex` CLI on `PATH` for `runtime: codex`
 
 ## Style
 
