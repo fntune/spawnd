@@ -12,3 +12,4 @@ venv/
 worktrees/
 .spawnd/
 .swarm/
+.vscode/
