@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 AGENT_NAME_PATTERN = r"^[A-Za-z0-9_.-]+$"
 
-
+    
 class RunConfig(BaseModel):
     """Run identity and resumption settings."""
 
