@@ -32,9 +32,10 @@ Spawnd treats multi-agent work as a **data structure**: a plan spec with named a
 pip install -e .            # without SDKs (use --mock for dry runs)
 pip install -e ".[sdk]"     # with Claude Agent SDK
 pip install -e ".[openai]"  # with OpenAI Agents SDK
+pip install -e ".[codex]"   # with Codex Python SDK
 ```
 
-The Codex runtime uses the external Codex CLI instead of a Python package. Install/repair the CLI separately and verify it with `codex doctor`.
+The Codex runtime prefers the beta `openai-codex` Python SDK when it is installed and falls back to the external `codex` CLI otherwise. Verify the local Codex runtime with `codex doctor`.
 
 ---
 
@@ -165,9 +166,11 @@ When `orchestration.worktree_setup` is configured, the command runs in each agen
 |---------|---------|---------------|-------|
 | `claude` | Claude Agent SDK | `sonnet` | Supports worker and manager agents with spawnd coordination tools. |
 | `openai` | OpenAI Agents SDK | `gpt-5` | Supports worker and manager agents; cost is estimated from token usage. |
-| `codex` | Codex CLI (`codex exec`) | `gpt-5` | Worker-only for now; uses the documented non-interactive CLI path. |
+| `codex` | Codex SDK beta, falling back to Codex CLI | Codex config default | Worker-only for now; uses the SDK app-server path when available. |
 
-Codex is launched as `codex exec --cd <worktree> --output-last-message <file> ... <prompt>`. By default spawnd adds `--ephemeral` and `--sandbox workspace-write`. Override with `SPAWND_CODEX_BIN`, `SPAWND_CODEX_SANDBOX`, `SPAWND_CODEX_EPHEMERAL`, `SPAWND_CODEX_DANGEROUS_BYPASS`, or `SPAWND_CODEX_EXTRA_ARGS` in the agent env. `codex app-server` and `exec-server` are lower-level experimental server surfaces, so they are not the default executor path.
+Codex engine selection is controlled by `SPAWND_CODEX_ENGINE`: `auto` (default), `sdk`, or `cli`. SDK mode uses `openai_codex.AsyncCodex` with `cwd=<worktree>`, `Sandbox.workspace_write`, `ApprovalMode.deny_all`, and an async context manager so app-server startup/shutdown are paired. CLI mode runs `codex exec --cd <worktree> --output-last-message <file> ... <prompt>`.
+
+By default spawnd uses the model from Codex config, ephemeral Codex threads, and workspace-write access. Override with `SPAWND_CODEX_MODEL`, `SPAWND_CODEX_SANDBOX`, `SPAWND_CODEX_EPHEMERAL`, `SPAWND_CODEX_APPROVAL_MODE`, `SPAWND_CODEX_BIN`, `SPAWND_CODEX_DANGEROUS_BYPASS`, or `SPAWND_CODEX_EXTRA_ARGS` in the agent env.
 
 ---
 

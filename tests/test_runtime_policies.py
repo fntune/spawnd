@@ -1,4 +1,5 @@
 """Focused tests for runtime policy helpers."""
+import json
 from spawnd.runtime.agent_state import transition_agent_status
 from spawnd.runtime.policies.budget import apply_run_budget_policy
 from spawnd.runtime.policies.circuit_breaker import apply_circuit_breaker_policy
@@ -79,8 +80,24 @@ def test_evaluate_stuck_run_marks_stuck_at_threshold(tmp_path, monkeypatch):
     run_id = 'run-stuck'
     db = _seed_run(run_id)
     events = [{'id': 'event-1'}]
-    is_stuck, marker, idle = evaluate_stuck_run(db, run_id, events=events, has_live_tasks=True, last_event_marker='event-1', idle_iterations=2, threshold=3)
+    is_stuck, marker, idle = evaluate_stuck_run(db, run_id, events=events, has_live_tasks=False, last_event_marker='event-1', idle_iterations=2, threshold=3)
     assert is_stuck is True
     assert marker == 'event-1'
     assert idle == 3
+    _ = db.close()
+
+def test_evaluate_stuck_run_heartbeats_quiet_live_tasks(tmp_path, monkeypatch):
+    _ = monkeypatch.chdir(tmp_path)
+    run_id = 'run-live-wait'
+    db = _seed_run(run_id)
+    events = [{'id': 'event-1'}]
+    is_stuck, marker, idle = evaluate_stuck_run(db, run_id, events=events, has_live_tasks=True, last_event_marker='event-1', idle_iterations=2, threshold=3)
+    assert is_stuck is False
+    assert marker != 'event-1'
+    assert idle == 0
+    event = db.execute("SELECT agent, event_type, data FROM events WHERE run_id = ? ORDER BY ts DESC LIMIT 1", (run_id,)).fetchone()
+    assert event['agent'] == '_system'
+    assert event['event_type'] == 'progress'
+    data = json.loads(event['data'])
+    assert data == {'status': 'waiting_for_live_tasks', 'idle_iterations': 3}
     _ = db.close()

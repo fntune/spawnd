@@ -17,12 +17,16 @@ openai = [
     "openai-agents>=0.6",
     "openai>=1.50",
 ]
+codex = [
+    "openai-codex>=0.1.0b2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "claude-agent-sdk>=0.1.19",
     "openai-agents>=0.6",
     "openai>=1.50",
+    "openai-codex>=0.1.0b2",
 ]
 
 [project.scripts]

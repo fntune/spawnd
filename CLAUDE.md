@@ -15,8 +15,9 @@ One scheduler, one SQLite state store, pluggable vendor runtimes. Executes agent
 pip install -e .                  # core
 pip install -e ".[sdk]"           # + Claude Agent SDK
 pip install -e ".[openai]"        # + OpenAI Agents SDK (gpt-5 etc.)
-pip install -e ".[dev]"           # both SDKs + pytest
-# Codex runtime uses the external Codex CLI; verify with `codex doctor`.
+pip install -e ".[codex]"         # + Codex Python SDK
+pip install -e ".[dev]"           # SDKs + pytest
+# Codex runtime can fall back to external Codex CLI; verify with `codex doctor`.
 
 # Type + tests
 pyright spawnd/
@@ -112,11 +113,11 @@ Pluggable vendor executors, selected per-agent via `runtime:` (defaults to `clau
 |---|---|---|---|
 | `claude` | `claude-agent-sdk` (`[sdk]`) | `sonnet` | SDK-reported USD (`cost_source="sdk"`) |
 | `openai` | `openai-agents` (`[openai]`) | `gpt-5` | Estimated from tokens × price table (`cost_source="estimated"`) |
-| `codex` | external Codex CLI (`codex exec`) | `gpt-5` | CLI-backed placeholder (`cost_source="codex-cli"`) |
+| `codex` | `openai-codex` SDK beta, falling back to external Codex CLI | Codex config default | Codex-tracked placeholder (`cost_source="codex"`) |
 
-Adapters self-register at `spawnd.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so spawnd works without the `[openai]` extra installed. Codex import is unconditional because it has no Python SDK dependency; the external `codex` binary is required only when an agent actually runs with `runtime: codex`.
+Adapters self-register at `spawnd.runtime.executors` import time. `get_executor(runtime)` raises `ExecutorNotFound` for unknown names. OpenAI import is guarded, so spawnd works without the `[openai]` extra installed. Codex import is unconditional; at runtime `SPAWND_CODEX_ENGINE=auto` prefers `openai_codex.AsyncCodex` when installed and falls back to `codex exec`.
 
-Mixed-runtime plans work across dependency edges. Manager-spawned children inherit the parent's runtime + cost_source. Codex currently supports worker agents only because the executor uses the documented non-interactive `codex exec` path; `codex app-server` / `exec-server` are experimental server surfaces and are not wired to spawnd coordination tools yet.
+Mixed-runtime plans work across dependency edges. Manager-spawned children inherit the parent's runtime + cost_source. Codex currently supports worker agents only. SDK mode uses `AsyncCodex` with `cwd=<worktree>`, `Sandbox.workspace_write`, `ApprovalMode.deny_all`, ephemeral threads, and an async context manager for app-server shutdown. CLI mode is forced with `SPAWND_CODEX_ENGINE=cli`. Codex uses its configured default model unless `SPAWND_CODEX_MODEL` or a Codex-compatible plan model is set.
 
 ## Failure Handling
 
@@ -192,7 +193,7 @@ Key columns: `name`, `status`, `type`, `runtime`, `parent`, `vendor_session_id`,
 - `pyyaml>=6.0` — plan parsing
 - `claude-agent-sdk>=0.1.19` (opt `[sdk]`)
 - `openai-agents>=0.6`, `openai>=1.50` (opt `[openai]`)
-- External `codex` CLI on `PATH` for `runtime: codex`
+- `openai-codex` (opt `[codex]`) or external `codex` CLI on `PATH` for `runtime: codex`
 
 ## Style
 

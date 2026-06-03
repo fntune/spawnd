@@ -45,7 +45,7 @@ def resolve_agent_plan_config(agent: AgentSpec, defaults: Defaults) -> ResolvedA
         model = defaults.model
     runtime = agent.runtime or defaults.runtime
     manager_cap = agent.manager.max_subagents if agent.type == 'manager' and agent.manager is not None else None
-    return ResolvedAgentPlanConfig(prompt=prompt, check_command=check_command, model=model, max_iterations=agent.max_iterations if agent.max_iterations is not None else defaults.max_iterations, max_cost_usd=agent.max_cost_usd if agent.max_cost_usd is not None else defaults.max_cost_usd, on_failure=agent.on_failure if agent.on_failure is not None else defaults.on_failure, retry_count=agent.retry_count if agent.retry_count is not None else defaults.retry_count, runtime=runtime, cost_source='estimated' if runtime == 'openai' else 'codex-cli' if runtime == 'codex' else 'sdk', manager_cap=manager_cap)
+    return ResolvedAgentPlanConfig(prompt=prompt, check_command=check_command, model=model, max_iterations=agent.max_iterations if agent.max_iterations is not None else defaults.max_iterations, max_cost_usd=agent.max_cost_usd if agent.max_cost_usd is not None else defaults.max_cost_usd, on_failure=agent.on_failure if agent.on_failure is not None else defaults.on_failure, retry_count=agent.retry_count if agent.retry_count is not None else defaults.retry_count, runtime=runtime, cost_source='estimated' if runtime == 'openai' else 'codex' if runtime == 'codex' else 'sdk', manager_cap=manager_cap)
 
 def hydrate_agent_runtime_config(agent_row: sqlite3.Row, prompt: str) -> HydratedAgentRuntimeConfig:
     """Hydrate runtime config from persisted DB row with backwards-compatible fallbacks."""
