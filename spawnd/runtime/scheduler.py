@@ -109,7 +109,7 @@ class Scheduler:
             defaults = self.plan.defaults
             for agent in self.plan.agents:
                 resolved = resolve_agent_plan_config(agent, defaults)
-                _ = insert_agent(self.db, self.run_id, agent.name, resolved.prompt, agent_type=agent.type, check_command=resolved.check_command, model=resolved.model or 'sonnet', max_iterations=resolved.max_iterations, max_cost_usd=resolved.max_cost_usd, depends_on=agent.depends_on, plan_name=self.plan.name, on_failure=resolved.on_failure, retry_count=resolved.retry_count, env=agent.env or None, max_subagents=resolved.manager_cap, runtime=resolved.runtime, cost_source=resolved.cost_source, autocommit=False)
+                _ = insert_agent(self.db, self.run_id, agent.name, resolved.prompt, agent_type=agent.type, check_command=resolved.check_command, model=resolved.model, max_iterations=resolved.max_iterations, max_cost_usd=resolved.max_cost_usd, depends_on=agent.depends_on, plan_name=self.plan.name, on_failure=resolved.on_failure, retry_count=resolved.retry_count, env=agent.env or None, max_subagents=resolved.manager_cap, runtime=resolved.runtime, cost_source=resolved.cost_source, autocommit=False)
         _ = logger.info(f'Initialized run {self.run_id} with {len(self.plan.agents)} agents')
 
     async def _spawn_agent(self, agent_row: sqlite3.Row) -> asyncio.Task:

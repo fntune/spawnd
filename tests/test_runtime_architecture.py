@@ -2,9 +2,10 @@
 from spawnd.runtime.agent_config import resolve_agent_plan_config
 from spawnd.runtime.agent_state import can_transition
 from spawnd.runtime.run_state import run_has_persisted_plan
+from spawnd.runtime.scheduler import Scheduler
 from spawnd.runtime.task_registry import CancellationRegistry
-from spawnd.models.specs import AgentSpec, Defaults
-from spawnd.storage.db import init_db, insert_plan
+from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
+from spawnd.storage.db import get_agent, init_db, insert_plan
 
 def test_resolve_agent_plan_config_uses_agent_overrides():
     defaults = Defaults(check='pytest', model='sonnet', runtime='claude', retry_count=3)
@@ -25,6 +26,34 @@ def test_resolve_agent_plan_config_prefers_role_defaults_over_plan_defaults():
     assert resolved.check_command == 'pytest tests/ -v'
     assert resolved.model == 'sonnet'
     assert '## Your Task' in resolved.prompt
+
+def test_resolve_agent_plan_config_omits_claude_default_for_codex():
+    defaults = Defaults(check='pytest', model='sonnet', runtime='codex', retry_count=3)
+    agent = AgentSpec(name='worker', prompt='Implement task')
+    resolved = resolve_agent_plan_config(agent, defaults)
+    assert resolved.model is None
+    assert resolved.runtime == 'codex'
+    assert resolved.cost_source == 'codex'
+
+def test_resolve_agent_plan_config_keeps_explicit_codex_model():
+    defaults = Defaults(check='pytest', model='gpt-5.5', runtime='codex', retry_count=3)
+    agent = AgentSpec(name='worker', prompt='Implement task')
+    resolved = resolve_agent_plan_config(agent, defaults)
+    assert resolved.model == 'gpt-5.5'
+
+def test_scheduler_persists_no_model_for_codex_default(tmp_path, monkeypatch):
+    _ = monkeypatch.chdir(tmp_path)
+    plan = PlanSpec(
+        name='codex-plan',
+        defaults=Defaults(runtime='codex'),
+        agents=[AgentSpec(name='worker', prompt='Implement task')],
+    )
+    scheduler = Scheduler(plan, run_id='codex-default-model')
+    scheduler._init_db()
+    agent = get_agent(scheduler.db, 'codex-default-model', 'worker')
+    assert agent is not None
+    assert agent['model'] is None
+    _ = scheduler.db.close()
 
 def test_agent_state_machine_rejects_cancelled_to_completed():
     assert can_transition('cancelled', 'completed') is False

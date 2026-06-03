@@ -24,7 +24,7 @@ class HydratedAgentRuntimeConfig:
     """Effective runtime config hydrated from an agent database row."""
     prompt: str
     check_command: str
-    model: str
+    model: str | None
     max_iterations: int
     max_cost_usd: float
     runtime: str
@@ -40,10 +40,13 @@ def resolve_agent_plan_config(agent: AgentSpec, defaults: Defaults) -> ResolvedA
     check_command = agent.check if agent.check is not None else role_defaults.get('check')
     if check_command is None:
         check_command = defaults.check
+    runtime = agent.runtime or defaults.runtime
     model = agent.model if agent.model is not None else role_defaults.get('model')
     if model is None:
-        model = defaults.model
-    runtime = agent.runtime or defaults.runtime
+        if runtime == 'codex' and defaults.model == 'sonnet':
+            model = None
+        else:
+            model = defaults.model
     manager_cap = agent.manager.max_subagents if agent.type == 'manager' and agent.manager is not None else None
     return ResolvedAgentPlanConfig(prompt=prompt, check_command=check_command, model=model, max_iterations=agent.max_iterations if agent.max_iterations is not None else defaults.max_iterations, max_cost_usd=agent.max_cost_usd if agent.max_cost_usd is not None else defaults.max_cost_usd, on_failure=agent.on_failure if agent.on_failure is not None else defaults.on_failure, retry_count=agent.retry_count if agent.retry_count is not None else defaults.retry_count, runtime=runtime, cost_source='estimated' if runtime == 'openai' else 'codex' if runtime == 'codex' else 'sdk', manager_cap=manager_cap)
 
@@ -58,4 +61,6 @@ def hydrate_agent_runtime_config(agent_row: sqlite3.Row, prompt: str) -> Hydrate
         runtime = agent_row['runtime'] or 'claude'
     except (IndexError, KeyError):
         runtime = 'claude'
-    return HydratedAgentRuntimeConfig(prompt=prompt, check_command=agent_row['check_command'] if agent_row['check_command'] is not None else 'true', model=agent_row['model'] if agent_row['model'] is not None else 'sonnet', max_iterations=agent_row['max_iterations'] if agent_row['max_iterations'] is not None else 30, max_cost_usd=agent_row['max_cost_usd'] if agent_row['max_cost_usd'] is not None else 5.0, runtime=runtime, env=json.loads(env_raw) if env_raw else None)
+    stored_model = agent_row['model']
+    model = stored_model if stored_model is not None else None if runtime == 'codex' else 'sonnet'
+    return HydratedAgentRuntimeConfig(prompt=prompt, check_command=agent_row['check_command'] if agent_row['check_command'] is not None else 'true', model=model, max_iterations=agent_row['max_iterations'] if agent_row['max_iterations'] is not None else 30, max_cost_usd=agent_row['max_cost_usd'] if agent_row['max_cost_usd'] is not None else 5.0, runtime=runtime, env=json.loads(env_raw) if env_raw else None)

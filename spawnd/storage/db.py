@@ -65,7 +65,7 @@ def insert_plan(db: sqlite3.Connection, run_id: str, name: str, spec: str, max_c
     if autocommit:
         _ = db.commit()
 
-def insert_agent(db: sqlite3.Connection, run_id: str, name: str, prompt: str, agent_type: str='worker', check_command: str | None=None, model: str='sonnet', max_iterations: int=30, max_cost_usd: float=5.0, depends_on: list[str] | None=None, parent: str | None=None, plan_name: str | None=None, on_failure: str='continue', retry_count: int=3, env: dict[str, str] | None=None, max_subagents: int | None=None, runtime: str='claude', cost_source: str='sdk', *, autocommit: bool=True) -> None:
+def insert_agent(db: sqlite3.Connection, run_id: str, name: str, prompt: str, agent_type: str='worker', check_command: str | None=None, model: str | None='sonnet', max_iterations: int=30, max_cost_usd: float=5.0, depends_on: list[str] | None=None, parent: str | None=None, plan_name: str | None=None, on_failure: str='continue', retry_count: int=3, env: dict[str, str] | None=None, max_subagents: int | None=None, runtime: str='claude', cost_source: str='sdk', *, autocommit: bool=True) -> None:
     """Insert an agent record."""
     _ = db.execute('INSERT INTO agents (\n            run_id, name, plan_name, type, prompt, check_command, model,\n            max_iterations, max_cost_usd, depends_on, parent, on_failure, retry_count,\n            env, max_subagents, runtime, cost_source\n        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (run_id, name, plan_name, agent_type, prompt, check_command, model, max_iterations, max_cost_usd, json.dumps(depends_on or []), parent, on_failure, retry_count, json.dumps(env) if env else None, max_subagents, runtime, cost_source))
     if autocommit:

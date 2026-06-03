@@ -10,7 +10,7 @@ class AgentConfig:
     prompt: str
     worktree: Path
     check_command: str = 'true'
-    model: str = 'sonnet'
+    model: str | None = 'sonnet'
     max_iterations: int = 30
     max_cost_usd: float = 5.0
     parent: str | None = None

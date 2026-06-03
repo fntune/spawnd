@@ -75,7 +75,7 @@ def _codex_model(config: AgentConfig, env: dict[str, str]) -> str | None:
     env_model = env.get("SPAWND_CODEX_MODEL")
     if env_model:
         return env_model
-    if config.model and config.model != "sonnet":
+    if config.model and config.model not in {"sonnet", "opus", "haiku"}:
         return config.model
     return None
 
