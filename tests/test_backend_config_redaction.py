@@ -50,5 +50,23 @@ def test_redaction_summarizes_text_and_attributes():
     assert attrs == {'password': '<redacted>', 'safe': 'value'}
 
 
+def test_freeform_redaction_omits_deployed_connection_strings():
+    text = "\n".join(
+        [
+            "SPAWND_DATABASE_URL=postgresql+psycopg://user:secret@db/spawnd",
+            "SPAWND_REDIS_URL='redis://:secret@redis:6379/0'",
+            "PUBLIC_FLAG=true",
+        ]
+    )
+
+    redacted = redact_freeform_text(text)
+
+    assert "postgresql+psycopg" not in redacted
+    assert "redis://:secret" not in redacted
+    assert "SPAWND_DATABASE_URL=<redacted>" in redacted
+    assert "SPAWND_REDIS_URL=<redacted>" in redacted
+    assert "PUBLIC_FLAG=true" in redacted
+
+
 def test_canonical_json_hash_is_order_insensitive():
     assert canonical_json_hash({'b': 2, 'a': 1}) == canonical_json_hash({'a': 1, 'b': 2})
