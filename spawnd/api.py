@@ -1,90 +1,248 @@
-"""Python API for spawnd — peer to the CLI.
+"""Python client API for deployed spawnd."""
+from __future__ import annotations
 
-Everything here is a thin wrapper around :func:`spawnd.runtime.scheduler.run_plan`.
-Runs started via this API are indistinguishable from runs started via the CLI:
-same SQLite database under ``.spawnd/runs/<run_id>/``, same worktrees, same
-``spawnd status``/``logs``/``merge``/``resume`` commands.
-"""
 from typing import Literal
+
+from spawnd.coordination.redis import CoordinationPlane
 from spawnd.io.validation import validate_plan
 from spawnd.models.specs import AgentSpec, Defaults, PlanSpec, RuntimeName
-from spawnd.runtime.run_state import run_has_persisted_plan
-from spawnd.runtime.scheduler import SchedulerResult, run_plan
-from spawnd.storage.logs import setup_logging
-__all__ = ['agent', 'handoff', 'pipeline', 'run']
+from spawnd.state.repository import DeployedRepository
+from spawnd.state.submission import submit_plan
 
-def agent(name: str, prompt: str, *, depends_on: list[str] | None=None, check: str | None=None, model: str | None=None, type: Literal['worker', 'manager']='worker', use_role: str | None=None, max_iterations: int | None=None, max_cost_usd: float | None=None, on_failure: Literal['continue', 'stop', 'retry'] | None=None, retry_count: int | None=None, runtime: RuntimeName | None=None, env: dict[str, str] | None=None) -> AgentSpec:
-    """Build an ``AgentSpec`` with Python-friendly keyword arguments.
+__all__ = [
+    "agent",
+    "artifacts",
+    "cancel",
+    "checks",
+    "events",
+    "handoff",
+    "pipeline",
+    "provenance",
+    "resume",
+    "run",
+    "status",
+    "submit",
+    "traces",
+]
 
-    Omitted fields fall through to plan-level or global defaults.
-    """
-    kwargs: dict = {'name': name, 'prompt': prompt, 'type': type}
+
+def agent(
+    name: str,
+    prompt: str,
+    *,
+    depends_on: list[str] | None = None,
+    check: str | None = None,
+    model: str | None = None,
+    type: Literal["worker", "manager"] = "worker",
+    use_role: str | None = None,
+    max_iterations: int | None = None,
+    max_cost_usd: float | None = None,
+    on_failure: Literal["continue", "stop", "retry"] | None = None,
+    retry_count: int | None = None,
+    runtime: RuntimeName | None = None,
+    env: dict[str, str] | None = None,
+) -> AgentSpec:
+    """Build an ``AgentSpec`` with Python-friendly keyword arguments."""
+
+    kwargs: dict = {"name": name, "prompt": prompt, "type": type}
     if depends_on is not None:
-        kwargs['depends_on'] = list(depends_on)
+        kwargs["depends_on"] = list(depends_on)
     if check is not None:
-        kwargs['check'] = check
+        kwargs["check"] = check
     if model is not None:
-        kwargs['model'] = model
+        kwargs["model"] = model
     if use_role is not None:
-        kwargs['use_role'] = use_role
+        kwargs["use_role"] = use_role
     if max_iterations is not None:
-        kwargs['max_iterations'] = max_iterations
+        kwargs["max_iterations"] = max_iterations
     if max_cost_usd is not None:
-        kwargs['max_cost_usd'] = max_cost_usd
+        kwargs["max_cost_usd"] = max_cost_usd
     if on_failure is not None:
-        kwargs['on_failure'] = on_failure
+        kwargs["on_failure"] = on_failure
     if retry_count is not None:
-        kwargs['retry_count'] = retry_count
+        kwargs["retry_count"] = retry_count
     if runtime is not None:
-        kwargs['runtime'] = runtime
+        kwargs["runtime"] = runtime
     if env is not None:
-        kwargs['env'] = dict(env)
+        kwargs["env"] = dict(env)
     return AgentSpec(**kwargs)
 
-def _coerce_plan(agents: list[AgentSpec] | PlanSpec, *, name: str, defaults: Defaults | None, shared_context: list[str] | None) -> PlanSpec:
+
+def _coerce_plan(
+    agents: list[AgentSpec] | PlanSpec,
+    *,
+    name: str,
+    defaults: Defaults | None,
+    shared_context: list[str] | None,
+) -> PlanSpec:
     if isinstance(agents, PlanSpec):
         return agents
-    return PlanSpec(name=name, defaults=defaults or Defaults(), shared_context=list(shared_context) if shared_context else [], agents=list(agents))
+    return PlanSpec(
+        name=name,
+        defaults=defaults or Defaults(),
+        shared_context=list(shared_context) if shared_context else [],
+        agents=list(agents),
+    )
 
-async def run(agents: list[AgentSpec] | PlanSpec, *, name: str='spawnd-run', run_id: str | None=None, resume: bool=False, defaults: Defaults | None=None, shared_context: list[str] | None=None, use_mock: bool=False, verbose: bool=False) -> SchedulerResult:
-    """Execute agents through the scheduler.
 
-    This is the single Python entry point. It mirrors ``spawnd run`` exactly:
-    validates the plan, persists everything to SQLite, allocates git worktrees,
-    and returns the :class:`SchedulerResult` the CLI would print.
-    """
-    if resume and (not run_id):
-        raise ValueError('resume=True requires run_id')
-    if resume and run_id and (not run_has_persisted_plan(run_id)):
-        raise ValueError(f'Run not found: {run_id}')
-    plan = _coerce_plan(agents, name=name, defaults=defaults, shared_context=shared_context)
+def submit(
+    plan: PlanSpec,
+    *,
+    repository: DeployedRepository,
+    coordinator: CoordinationPlane,
+    run_id: str | None = None,
+    source_repo: str | None = None,
+    source_ref: str | None = None,
+) -> str:
+    """Submit a run to the deployed backend."""
+
     errors = validate_plan(plan)
     if errors:
         raise ValueError(f"Invalid plan: {'; '.join(errors)}")
-    if run_id:
-        _ = setup_logging(run_id, verbose)
-    return await run_plan(plan, run_id=run_id, use_mock=use_mock, resume=resume)
+    return submit_plan(
+        plan,
+        repository=repository,
+        coordinator=coordinator,
+        run_id=run_id,
+        source_repo=source_repo,
+        source_ref=source_ref,
+    )
 
-async def pipeline(steps: list[AgentSpec], *, name: str='spawnd-pipeline', run_id: str | None=None, defaults: Defaults | None=None, shared_context: list[str] | None=None, use_mock: bool=False, verbose: bool=False) -> SchedulerResult:
-    """Run ``steps`` sequentially by auto-chaining ``depends_on``.
 
-    Each step after the first is linked to the previous via ``depends_on``,
-    causing the scheduler to run them in order with dependency context
-    merged between worktrees. Existing ``depends_on`` values on steps are
-    preserved (the previous step's name is appended, not replaced).
-    """
+def run(
+    agents: list[AgentSpec] | PlanSpec,
+    *,
+    repository: DeployedRepository,
+    coordinator: CoordinationPlane,
+    name: str = "spawnd-run",
+    run_id: str | None = None,
+    defaults: Defaults | None = None,
+    shared_context: list[str] | None = None,
+    source_repo: str | None = None,
+    source_ref: str | None = None,
+) -> str:
+    """Build and submit a deployed run."""
+
+    plan = _coerce_plan(agents, name=name, defaults=defaults, shared_context=shared_context)
+    return submit(plan, repository=repository, coordinator=coordinator, run_id=run_id, source_repo=source_repo, source_ref=source_ref)
+
+
+def pipeline(
+    steps: list[AgentSpec],
+    *,
+    repository: DeployedRepository,
+    coordinator: CoordinationPlane,
+    name: str = "spawnd-pipeline",
+    run_id: str | None = None,
+    defaults: Defaults | None = None,
+    shared_context: list[str] | None = None,
+    source_repo: str | None = None,
+    source_ref: str | None = None,
+) -> str:
+    """Submit sequential agents by linking ``depends_on``."""
+
     chained: list[AgentSpec] = []
     for idx, step in enumerate(steps):
         if idx == 0:
-            _ = chained.append(step)
+            chained.append(step)
             continue
         prev_name = steps[idx - 1].name
-        existing = list(step.depends_on)
-        if prev_name not in existing:
-            _ = existing.append(prev_name)
-        _ = chained.append(step.model_copy(update={'depends_on': existing}))
-    return await run(chained, name=name, run_id=run_id, defaults=defaults, shared_context=shared_context, use_mock=use_mock, verbose=verbose)
+        deps = list(step.depends_on)
+        if prev_name not in deps:
+            deps.append(prev_name)
+        chained.append(step.model_copy(update={"depends_on": deps}))
+    return run(
+        chained,
+        repository=repository,
+        coordinator=coordinator,
+        name=name,
+        run_id=run_id,
+        defaults=defaults,
+        shared_context=shared_context,
+        source_repo=source_repo,
+        source_ref=source_ref,
+    )
 
-async def handoff(a: AgentSpec, b: AgentSpec, *, name: str='spawnd-handoff', run_id: str | None=None, defaults: Defaults | None=None, shared_context: list[str] | None=None, use_mock: bool=False, verbose: bool=False) -> SchedulerResult:
-    """Run ``a`` then ``b``; ``b`` inherits ``a``'s worktree via the dep merge."""
-    return await pipeline([a, b], name=name, run_id=run_id, defaults=defaults, shared_context=shared_context, use_mock=use_mock, verbose=verbose)
+
+def handoff(
+    a: AgentSpec,
+    b: AgentSpec,
+    *,
+    repository: DeployedRepository,
+    coordinator: CoordinationPlane,
+    name: str = "spawnd-handoff",
+    run_id: str | None = None,
+    defaults: Defaults | None = None,
+    shared_context: list[str] | None = None,
+    source_repo: str | None = None,
+    source_ref: str | None = None,
+) -> str:
+    """Submit two agents in sequence."""
+
+    return pipeline(
+        [a, b],
+        repository=repository,
+        coordinator=coordinator,
+        name=name,
+        run_id=run_id,
+        defaults=defaults,
+        shared_context=shared_context,
+        source_repo=source_repo,
+        source_ref=source_ref,
+    )
+
+
+def status(run_id: str, *, repository: DeployedRepository) -> dict:
+    """Return run status reconstructed from Postgres."""
+
+    run_row = repository.get_run(run_id)
+    if run_row is None:
+        raise ValueError(f"Run not found: {run_id}")
+    return {
+        "run": run_row,
+        "agents": repository.get_agents(run_id),
+        "attempts": repository.get_attempts(run_id),
+        "telemetry": repository.telemetry_summary(run_id),
+    }
+
+
+def events(run_id: str, *, repository: DeployedRepository, limit: int = 100) -> list[dict]:
+    return repository.get_events(run_id, limit=limit)
+
+
+def artifacts(run_id: str, *, repository: DeployedRepository, agent_name: str | None = None) -> list[dict]:
+    return repository.get_artifacts(run_id, agent_name)
+
+
+def checks(run_id: str, *, repository: DeployedRepository, agent_name: str | None = None) -> list[dict]:
+    return repository.get_checks(run_id, agent_name)
+
+
+def traces(run_id: str, *, repository: DeployedRepository, agent_name: str | None = None) -> list[dict]:
+    return repository.fetch_trace_spans(run_id, agent_name)
+
+
+def provenance(run_id: str, *, repository: DeployedRepository, agent_name: str | None = None) -> list[dict]:
+    return repository.get_git_provenance(run_id, agent_name)
+
+
+def cancel(run_id: str, *, repository: DeployedRepository, coordinator: CoordinationPlane | None = None) -> int:
+    """Cancel a run in Postgres, then publish a Redis cancellation hint."""
+
+    cancelled = repository.cancel_run(run_id)
+    if coordinator is not None:
+        coordinator.publish_cancel(run_id)
+    return cancelled
+
+
+def resume(run_id: str, *, repository: DeployedRepository, coordinator: CoordinationPlane | None = None) -> list[dict]:
+    """Resume retryable agents and publish queue hints for queued rows."""
+
+    resumed = repository.resume_run(run_id)
+    if coordinator is not None:
+        for item in resumed:
+            if item["status"] == "queued":
+                outbox_id = repository.record_queue_outbox(run_id, item["agent"], "agent_ready", {"run_id": run_id, "agent": item["agent"]})
+                coordinator.enqueue_agent(run_id, item["agent"])
+                repository.mark_outbox_published(outbox_id)
+    return resumed

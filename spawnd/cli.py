@@ -1,353 +1,509 @@
-"""CLI for spawnd.dev."""
+"""Deployed-only CLI for spawnd.dev."""
+from __future__ import annotations
+
 import asyncio
 import json
-import logging
-import shutil
+import subprocess
 import time
 from pathlib import Path
-import click
-import yaml
-from spawnd.storage.db import get_agents, get_db, get_plan, get_total_cost, list_runs, open_db, update_agent_status, update_plan_status
-from spawnd.storage.paths import get_db_path, get_run_dir
-from spawnd.core.deps import DependencyGraph
-from spawnd.gitops.worktrees import cleanup_run_worktrees, merge_branch_to_current
-from spawnd.storage.logs import list_logs, read_all_logs, read_log, setup_logging, tail_log
-from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
-from spawnd.io.parser import generate_run_id, parse_plan_file
-from spawnd.io.validation import validate_plan
-from spawnd.io.plan_builder import create_inline_plan
-from spawnd.roles import BUILTIN_ROLES, get_role
-from spawnd.runtime.scheduler import run_plan
-from spawnd.runtime.run_state import run_has_persisted_plan
-logger = logging.getLogger('spawnd.cli')
+from typing import Any
 
-def ensure_run_exists(run_id: str) -> None:
-    """Abort with a friendly message when a run does not exist."""
-    if not run_has_persisted_plan(run_id):
-        _ = click.echo(f'Run not found: {run_id}', err=True)
-        raise click.Abort()
+import click
+
+from spawnd.artifacts.store import InMemoryArtifactStore, S3ArtifactStore
+from spawnd.config import load_backend_config
+from spawnd.coordination.redis import RedisCoordinator
+from spawnd.io.parser import generate_run_id, parse_plan_file
+from spawnd.io.plan_builder import create_inline_plan
+from spawnd.io.validation import validate_plan
+from spawnd.models.specs import Defaults, PlanSpec
+from spawnd.observability.telemetry import TelemetryRecorder
+from spawnd.roles import BUILTIN_ROLES, get_role
+from spawnd.state.repository import DeployedRepository
+from spawnd.state.submission import submit_plan, worker_id as make_worker_id
+from spawnd.workers.worker import DeployedWorker, reconcile_ready_agents
+
+
+def _config():
+    return load_backend_config()
+
+
+def _repository(*, create_schema: bool = False) -> DeployedRepository:
+    config = _config()
+    if not config.database_url:
+        raise click.UsageError("SPAWND_DATABASE_URL is required")
+    repo = DeployedRepository.from_url(config.database_url)
+    if create_schema:
+        repo.create_schema()
+    return repo
+
+
+def _coordinator() -> RedisCoordinator:
+    config = _config()
+    if not config.redis_url:
+        raise click.UsageError("SPAWND_REDIS_URL is required")
+    return RedisCoordinator.from_url(config.redis_url)
+
+
+def _artifact_store() -> S3ArtifactStore:
+    config = _config()
+    if not config.artifacts.configured:
+        raise click.UsageError("SPAWND_ARTIFACTS_BUCKET is required to read artifact-backed logs")
+    return S3ArtifactStore(config.artifacts)
+
+
+def _components(*, create_schema: bool = False, use_memory_artifacts: bool = False):
+    config = _config()
+    repo = _repository(create_schema=create_schema)
+    coordinator = _coordinator()
+    if config.artifacts.configured:
+        artifacts = S3ArtifactStore(config.artifacts)
+    elif use_memory_artifacts:
+        artifacts = InMemoryArtifactStore()
+    else:
+        raise click.UsageError("SPAWND_ARTIFACTS_BUCKET is required; --in-memory-artifacts is for tests")
+    telemetry = TelemetryRecorder(config.telemetry, repo)
+    return repo, coordinator, artifacts, telemetry
+
+
+def _load_plan(plan_file: str | None, prompt: tuple[str, ...], check_cmd: str | None, sequential: bool) -> PlanSpec:
+    if plan_file:
+        return parse_plan_file(Path(plan_file))
+    if prompt:
+        defaults = Defaults(check=check_cmd) if check_cmd else None
+        return create_inline_plan(list(prompt), sequential=sequential, defaults=defaults)
+    raise click.UsageError("Either --file or --prompt is required")
+
+
+def _validate(plan: PlanSpec) -> None:
+    errors = validate_plan(plan)
+    if not errors:
+        return
+    for error in errors:
+        click.echo(f"Error: {error}", err=True)
+    raise click.Abort()
+
+
+def _submit(
+    plan: PlanSpec,
+    *,
+    run_id: str | None,
+    source_repo: str | None,
+    source_ref: str | None,
+    create_schema: bool,
+) -> str:
+    _validate(plan)
+    repo = _repository(create_schema=create_schema)
+    coordinator = _coordinator()
+    actual_run_id = submit_plan(
+        plan,
+        repository=repo,
+        coordinator=coordinator,
+        run_id=run_id,
+        source_repo=source_repo or str(Path.cwd()),
+        source_ref=source_ref,
+    )
+    return actual_run_id
+
+
+def _json_echo(value: Any) -> None:
+    click.echo(json.dumps(value, indent=2, default=str))
+
 
 @click.group()
 @click.version_option()
 def main() -> None:
-    """spawnd.dev — multi-agent orchestration."""
-    pass
+    """spawnd.dev deployed orchestration."""
+
 
 @main.command()
-@click.option('-f', '--file', 'plan_file', type=click.Path(exists=True), help='Plan YAML file')
-@click.option('-p', '--prompt', multiple=True, help='Inline agent prompts')
-@click.option('--check', 'check_cmd', default=None, help='Check command for inline prompts')
-@click.option('--sequential', is_flag=True, help='Run agents sequentially')
-@click.option('--run-id', 'run_id', default=None, help='Explicit run ID')
-@click.option('--resume', is_flag=True, help='Resume existing run')
-@click.option('--mock', is_flag=True, help='Use mock workers (for testing)')
-@click.option('-v', '--verbose', is_flag=True, help='Verbose output')
-def run(plan_file: str | None, prompt: tuple[str, ...], check_cmd: str | None, sequential: bool, run_id: str | None, resume: bool, mock: bool, verbose: bool) -> None:
-    """Run a spawnd plan."""
-    if resume and (not run_id):
-        raise click.UsageError('--resume requires --run-id')
-    if resume and run_id:
-        _ = ensure_run_exists(run_id)
-    if resume and run_id and run_has_persisted_plan(run_id):
-        if plan_file:
-            plan = parse_plan_file(Path(plan_file))
-        elif prompt:
-            defaults = Defaults(check=check_cmd) if check_cmd else None
-            plan = create_inline_plan(list(prompt), sequential=sequential, defaults=defaults)
+@click.option("-f", "--file", "plan_file", type=click.Path(exists=True), help="Plan YAML file")
+@click.option("-p", "--prompt", multiple=True, help="Inline agent prompts")
+@click.option("--check", "check_cmd", default=None, help="Check command for inline prompts")
+@click.option("--sequential", is_flag=True, help="Run inline agents sequentially")
+@click.option("--run-id", default=None, help="Explicit run id")
+@click.option("--source-repo", default=None, help="Source repository path")
+@click.option("--source-ref", default=None, help="Source revision/ref")
+@click.option("--create-schema", is_flag=True, help="Create deployed schema before submit")
+def run(
+    plan_file: str | None,
+    prompt: tuple[str, ...],
+    check_cmd: str | None,
+    sequential: bool,
+    run_id: str | None,
+    source_repo: str | None,
+    source_ref: str | None,
+    create_schema: bool,
+) -> None:
+    """Submit a run to the deployed backend."""
+
+    plan = _load_plan(plan_file, prompt, check_cmd, sequential)
+    actual_run_id = _submit(
+        plan,
+        run_id=run_id or (plan.run.id if plan.run and plan.run.id else generate_run_id(plan.name)),
+        source_repo=source_repo,
+        source_ref=source_ref,
+        create_schema=create_schema,
+    )
+    click.echo(f"Submitted run: {actual_run_id}")
+
+
+@main.command()
+@click.option("-f", "--file", "plan_file", type=click.Path(exists=True), required=True, help="Plan YAML file")
+@click.option("--run-id", default=None, help="Explicit run id")
+@click.option("--source-repo", default=None, help="Source repository path")
+@click.option("--source-ref", default=None, help="Source revision/ref")
+@click.option("--create-schema", is_flag=True, help="Create deployed schema before submit")
+def submit(plan_file: str, run_id: str | None, source_repo: str | None, source_ref: str | None, create_schema: bool) -> None:
+    """Alias for deployed plan submission."""
+
+    actual_run_id = _submit(
+        parse_plan_file(Path(plan_file)),
+        run_id=run_id,
+        source_repo=source_repo,
+        source_ref=source_ref,
+        create_schema=create_schema,
+    )
+    click.echo(f"Submitted run: {actual_run_id}")
+
+
+@main.command()
+@click.option("--once", "run_once_flag", is_flag=True, help="Claim and execute at most one ready agent")
+@click.option("--poll", "run_poll_flag", is_flag=True, help="Continuously poll and execute ready agents")
+@click.option("--mock", is_flag=True, help="Use the fake runtime executor")
+@click.option("--worker-id", "worker_id_value", default=None, help="Stable worker id")
+@click.option("--source-path", type=click.Path(exists=True, file_okay=False), default=None, help="Source repository path")
+@click.option("--lease-seconds", type=int, default=300, show_default=True)
+@click.option("--block-ms", type=int, default=1000, show_default=True)
+@click.option("--idle-sleep-seconds", type=float, default=1.0, show_default=True)
+@click.option("--create-schema", is_flag=True, help="Create deployed schema before starting")
+@click.option("--in-memory-artifacts", is_flag=True, help="Use volatile test artifacts")
+def worker(
+    run_once_flag: bool,
+    run_poll_flag: bool,
+    mock: bool,
+    worker_id_value: str | None,
+    source_path: str | None,
+    lease_seconds: int,
+    block_ms: int,
+    idle_sleep_seconds: float,
+    create_schema: bool,
+    in_memory_artifacts: bool,
+) -> None:
+    """Run a deployed worker against Postgres and Redis."""
+
+    if run_once_flag == run_poll_flag:
+        raise click.UsageError("Choose exactly one of --once or --poll")
+    repo, coordinator, artifacts, telemetry = _components(create_schema=create_schema, use_memory_artifacts=in_memory_artifacts)
+    deployed_worker = DeployedWorker(
+        repository=repo,
+        coordinator=coordinator,
+        artifacts=artifacts,
+        telemetry=telemetry,
+        worker_id=worker_id_value or make_worker_id(),
+        source_path=Path(source_path) if source_path else None,
+        lease_seconds=lease_seconds,
+        use_mock=mock,
+    )
+    if run_once_flag:
+        result = asyncio.run(deployed_worker.run_once(block_ms=block_ms))
+        if result.claimed:
+            click.echo(f"Worker {deployed_worker.worker_id} finished {result.run_id}/{result.agent}: {result.status}")
         else:
-            with get_db(run_id) as db:
-                plan_row = get_plan(db, run_id)
-            if not plan_row:
-                raise click.UsageError(f'Plan not found for run: {run_id}')
-            plan = PlanSpec(**yaml.safe_load(plan_row['spec']))
-    elif plan_file:
-        plan = parse_plan_file(Path(plan_file))
-    elif prompt:
-        defaults = Defaults(check=check_cmd) if check_cmd else None
-        plan = create_inline_plan(list(prompt), sequential=sequential, defaults=defaults)
-    else:
-        raise click.UsageError('Either --file or --prompt is required')
-    if not resume:
-        errors = validate_plan(plan)
-        if errors:
-            for error in errors:
-                _ = click.echo(f'Error: {error}', err=True)
-            raise click.Abort()
-    actual_run_id = run_id or generate_run_id(plan.name)
-    _ = setup_logging(actual_run_id, verbose)
-    if resume:
-        _ = click.echo(f'Resuming run: {actual_run_id}')
-    else:
-        _ = click.echo(f'Starting run: {actual_run_id}')
-    _ = click.echo(f'Agents: {[a.name for a in plan.agents]}')
-    result = asyncio.run(run_plan(plan, actual_run_id, use_mock=mock, resume=resume))
-    _ = click.echo(f'\nRun completed: {result.run_id}')
-    _ = click.echo(f'Success: {result.success}')
-    _ = click.echo(f'Completed: {result.completed}')
-    _ = click.echo(f'Failed: {result.failed}')
-    _ = click.echo(f'Total cost: ${result.total_cost:.4f}')
-
-@main.command()
-@click.argument('run_id', required=False)
-@click.option('--json', 'as_json', is_flag=True, help='Output as JSON')
-def status(run_id: str | None, as_json: bool) -> None:
-    """Show status of a run. If no run_id, shows latest."""
-    if not run_id:
-        run_id = next((candidate for candidate in list_runs() if run_has_persisted_plan(candidate)), None)
-        if not run_id:
-            _ = click.echo('No runs found', err=True)
-            raise click.Abort()
-    else:
-        _ = ensure_run_exists(run_id)
-    with get_db(run_id) as db:
-        plan = get_plan(db, run_id)
-        if not plan:
-            _ = click.echo(f'Plan not found for run: {run_id}', err=True)
-            raise click.Abort()
-        agents = get_agents(db, run_id)
-        total_cost = get_total_cost(db, run_id)
-        if as_json:
-            output = {'run_id': run_id, 'plan': plan['name'], 'status': plan['status'], 'total_cost': total_cost, 'agents': [{'name': a['name'], 'status': a['status'], 'type': a['type'], 'iteration': a['iteration'], 'max_iterations': a['max_iterations'], 'cost': a['cost_usd'], 'error': a['error']} for a in agents]}
-            _ = click.echo(json.dumps(output, indent=2))
-        else:
-            _ = click.echo(f'Run: {run_id}')
-            _ = click.echo(f"Plan: {plan['name']}")
-            _ = click.echo(f"Status: {plan['status']}")
-            _ = click.echo(f'Cost: ${total_cost:.4f}')
-            _ = click.echo('\nAgents:')
-            for agent in agents:
-                status_str = agent['status']
-                if agent['error']:
-                    status_str += f" ({agent['error'][:50]})"
-                _ = click.echo(f"  {agent['name']}: {status_str}")
-
-@main.command()
-@click.argument('run_id')
-@click.option('-a', '--agent', help='Specific agent name')
-@click.option('-n', '--lines', type=int, help='Number of lines')
-@click.option('-f', '--follow', is_flag=True, help='Follow log output')
-@click.option('--all', 'show_all', is_flag=True, help='Show all agent logs')
-def logs(run_id: str, agent: str | None, lines: int | None, follow: bool, show_all: bool) -> None:
-    """View logs for a run."""
-    if show_all:
-        content = read_all_logs(run_id)
-        _ = click.echo(content)
-    elif agent:
-        if follow:
-            _ = tail_log(run_id, agent, follow=True)
-        else:
-            content = read_log(run_id, agent, lines=lines)
-            _ = click.echo(content)
-    else:
-        available = list_logs(run_id)
-        if available:
-            _ = click.echo(f'Available logs for {run_id}:')
-            for name in sorted(available):
-                _ = click.echo(f'  {name}')
-        else:
-            _ = click.echo(f'No logs found for {run_id}')
-
-@main.command()
-@click.argument('run_id')
-def cancel(run_id: str) -> None:
-    """Cancel a running spawnd run."""
-    _ = ensure_run_exists(run_id)
-    with get_db(run_id) as db:
-        _ = update_plan_status(db, run_id, 'cancelled')
-        agents = get_agents(db, run_id)
-        cancelled = 0
-        for agent in agents:
-            if agent['status'] not in ('completed', 'failed', 'timeout', 'cancelled', 'cost_exceeded'):
-                _ = update_agent_status(db, run_id, agent['name'], 'cancelled')
-                cancelled += 1
-        _ = click.echo(f'Cancelled run {run_id}')
-        _ = click.echo(f'Agents cancelled: {cancelled}')
-
-@main.command()
-@click.argument('run_id')
-@click.option('--dry-run', is_flag=True, help='Show what would be merged')
-def merge(run_id: str, dry_run: bool) -> None:
-    """Merge completed agent branches."""
-    _ = ensure_run_exists(run_id)
-    with get_db(run_id) as db:
-        agents = get_agents(db, run_id)
-        completed = [a for a in agents if a['status'] == 'completed']
-        if not completed:
-            _ = click.echo('No completed agents to merge')
-            return
-        specs = [AgentSpec(name=a['name'], prompt=a['prompt'], depends_on=json.loads(a['depends_on']) if a['depends_on'] else []) for a in completed]
-        graph = DependencyGraph(specs)
-        try:
-            merge_order = graph.topological_order()
-        except ValueError as e:
-            _ = click.echo(f'Error: {e}', err=True)
-            raise click.Abort()
-        _ = click.echo(f'Merge order: {merge_order}')
-        if dry_run:
-            _ = click.echo('(dry run - no changes made)')
-            return
-        for name in merge_order:
-            agent = next((a for a in completed if a['name'] == name))
-            branch = agent['branch']
-            if branch:
-                _ = click.echo(f'Merging {name} ({branch})...')
-                try:
-                    merged = merge_branch_to_current(branch)
-                except Exception as e:
-                    _ = click.echo(f'  Failed: {e}', err=True)
-                    raise click.Abort()
-                if not merged:
-                    _ = click.echo('  Merge conflict detected. Resolve it manually before continuing.', err=True)
-                    raise click.Abort()
-                _ = click.echo('  Merged successfully')
-
-@main.command()
-@click.argument('run_id')
-def dashboard(run_id: str) -> None:
-    """Show live dashboard for a run."""
-    _ = ensure_run_exists(run_id)
-    db = open_db(run_id)
-    try:
-        while True:
-            _ = click.clear()
-            plan = get_plan(db, run_id)
-            agents = get_agents(db, run_id)
-            cost = get_total_cost(db, run_id)
-            _ = click.echo(f'=== {run_id} ===')
-            _ = click.echo(f"Status: {(plan['status'] if plan else 'unknown')}")
-            _ = click.echo(f'Cost: ${cost:.4f}')
-            _ = click.echo()
-            counts = {}
-            for a in agents:
-                counts[a['status']] = counts.get(a['status'], 0) + 1
-            _ = click.echo(f'Agents: {counts}')
-            _ = click.echo()
-            for agent in agents:
-                icon = {'pending': '⏳', 'running': '🔄', 'completed': '✅', 'failed': '❌', 'cancelled': '🚫', 'paused': '⏸️', 'timeout': '⌛', 'cost_exceeded': '💸'}.get(agent['status'], '?')
-                _ = click.echo(f"{icon} {agent['name']}: {agent['status']}")
-            all_done = all((a['status'] in ('completed', 'failed', 'timeout', 'cancelled', 'cost_exceeded', 'paused') for a in agents))
-            if all_done:
-                _ = click.echo('\nAll agents finished.')
-                break
-            _ = time.sleep(2)
-    except KeyboardInterrupt:
-        _ = click.echo('\n')
-    finally:
-        _ = db.close()
-
-@main.command()
-@click.argument('run_id')
-@click.option('-v', '--verbose', is_flag=True, help='Verbose output')
-def resume(run_id: str, verbose: bool) -> None:
-    """Resume a previous run (alias for run --resume --run-id)."""
-    _ = ensure_run_exists(run_id)
-    with get_db(run_id) as db:
-        plan_row = get_plan(db, run_id)
-    if not plan_row:
-        _ = click.echo(f'Plan not found for run: {run_id}', err=True)
-        raise click.Abort()
-    plan = PlanSpec(**yaml.safe_load(plan_row['spec']))
-    _ = setup_logging(run_id, verbose)
-    _ = click.echo(f'Resuming run: {run_id}')
-    _ = click.echo(f'Agents: {[a.name for a in plan.agents]}')
-    result = asyncio.run(run_plan(plan, run_id, resume=True))
-    _ = click.echo(f'\nRun completed: {result.run_id}')
-    _ = click.echo(f'Success: {result.success}')
-    _ = click.echo(f'Completed: {result.completed}')
-    _ = click.echo(f'Failed: {result.failed}')
-    _ = click.echo(f'Total cost: ${result.total_cost:.4f}')
-
-@main.command()
-@click.argument('run_id', required=False)
-@click.option('--all', 'clean_all', is_flag=True, help='Clean all runs')
-def clean(run_id: str | None, clean_all: bool) -> None:
-    """Clean up run artifacts (worktrees, db)."""
-    if clean_all:
-        runs = list_runs()
-        if not runs:
-            _ = click.echo('No runs found')
-            return
-        for rid in runs:
-            run_dir = get_run_dir(rid)
-            if run_dir.exists():
-                try:
-                    _ = cleanup_run_worktrees(rid)
-                except Exception as e:
-                    _ = logger.warning(f'Failed to clean git worktrees for {rid}: {e}')
-                _ = shutil.rmtree(run_dir)
-                _ = click.echo(f'Cleaned: {rid}')
-        _ = click.echo(f'Cleaned {len(runs)} runs')
-    elif run_id:
-        run_dir = get_run_dir(run_id)
-        if run_dir.exists():
-            try:
-                _ = cleanup_run_worktrees(run_id)
-            except Exception as e:
-                _ = logger.warning(f'Failed to clean git worktrees for {run_id}: {e}')
-            _ = shutil.rmtree(run_dir)
-            _ = click.echo(f'Cleaned: {run_id}')
-        else:
-            _ = click.echo(f'Run not found: {run_id}', err=True)
-    else:
-        raise click.UsageError('Provide a run_id or use --all')
-
-@main.command()
-@click.argument('run_id', required=False)
-@click.argument('query', required=False)
-def db(run_id: str | None, query: str | None) -> None:
-    """Query the SQLite database."""
-    if not run_id:
-        runs = list_runs()
-        if runs:
-            _ = click.echo('Available runs:')
-            for rid in runs[:10]:
-                _ = click.echo(f'  {rid}')
-            if len(runs) > 10:
-                _ = click.echo(f'  ... and {len(runs) - 10} more')
-        else:
-            _ = click.echo('No runs found')
+            click.echo(f"Worker {deployed_worker.worker_id} found no ready agents")
         return
-    _ = ensure_run_exists(run_id)
-    with get_db(run_id) as conn:
-        if query:
-            try:
-                cursor = conn.execute(query)
-                rows = cursor.fetchall()
-                if rows:
-                    cols = [desc[0] for desc in cursor.description]
-                    _ = click.echo('\t'.join(cols))
-                    _ = click.echo('-' * 60)
-                    for row in rows:
-                        _ = click.echo('\t'.join((str(v) for v in row)))
-                else:
-                    _ = click.echo('No results')
-            except Exception as e:
-                _ = click.echo(f'Query error: {e}', err=True)
-        else:
-            _ = click.echo(f'Database: {get_db_path(run_id)}')
-            _ = click.echo('Usage: spawnd db <run_id> "SELECT * FROM agents"')
-            _ = click.echo('\nTables: plans, agents, events, responses')
+    click.echo(f"Worker {deployed_worker.worker_id} polling")
+    asyncio.run(deployed_worker.run_poll(idle_sleep_seconds=idle_sleep_seconds, block_ms=block_ms))
+
 
 @main.command()
-@click.argument('role_name', required=False)
+@click.option("--create-schema", is_flag=True, help="Create deployed schema before reconciling")
+def reconcile(create_schema: bool) -> None:
+    """Recover Redis queue hints from canonical Postgres state."""
+
+    repo = _repository(create_schema=create_schema)
+    coordinator = _coordinator()
+    requeued = reconcile_ready_agents(repo, coordinator)
+    click.echo(f"Requeued hints: {len(requeued)}")
+    for item in requeued:
+        click.echo(f"  {item['run_id']}/{item['agent']}")
+
+
+@main.command("worker-heartbeat")
+@click.option("--worker-id", "worker_id_value", default=None, help="Stable worker id")
+@click.option("--create-schema", is_flag=True, help="Create deployed schema first")
+def worker_heartbeat(worker_id_value: str | None, create_schema: bool) -> None:
+    """Record a worker heartbeat."""
+
+    repo = _repository(create_schema=create_schema)
+    worker_id_value = worker_id_value or make_worker_id()
+    repo.record_worker_heartbeat(worker_id_value)
+    _coordinator().heartbeat(worker_id_value)
+    click.echo(f"Heartbeat recorded: {worker_id_value}")
+
+
+@main.command()
+@click.argument("run_id", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def status(run_id: str | None, as_json: bool) -> None:
+    """Show deployed run status."""
+
+    repo = _repository()
+    if run_id is None:
+        rows = repo.list_runs(limit=1)
+        if not rows:
+            click.echo("No runs found", err=True)
+            raise click.Abort()
+        run_id = str(rows[0]["run_id"])
+    run_row = repo.get_run(run_id)
+    if run_row is None:
+        raise click.UsageError(f"Run not found: {run_id}")
+    agents = repo.get_agents(run_id)
+    payload = {
+        "run_id": run_id,
+        "plan": run_row["name"],
+        "status": run_row["status"],
+        "total_cost": run_row["total_cost_usd"],
+        "telemetry": repo.telemetry_summary(run_id),
+        "agents": agents,
+    }
+    if as_json:
+        _json_echo(payload)
+        return
+    click.echo(f"Run: {run_id}")
+    click.echo(f"Plan: {run_row['name']}")
+    click.echo(f"Status: {run_row['status']}")
+    click.echo(f"Cost: ${float(run_row['total_cost_usd'] or 0.0):.4f}")
+    click.echo("\nAgents:")
+    for agent in agents:
+        detail = f" ({agent['error'][:80]})" if agent.get("error") else ""
+        click.echo(f"  {agent['name']}: {agent['status']}{detail}")
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+@click.option("--limit", type=int, default=100, show_default=True)
+def events(run_id: str, agent_name: str | None, as_json: bool, limit: int) -> None:
+    """List deployed run events."""
+
+    rows = _repository().get_events(run_id, limit=limit)
+    if agent_name:
+        rows = [row for row in rows if row["agent"] == agent_name]
+    if as_json:
+        _json_echo(rows)
+        return
+    for row in rows:
+        click.echo(f"{row.get('created_at')} {row['agent']} {row['event_type']}")
+
+
+@main.command("live-events")
+@click.argument("run_id")
+@click.option("--interval", type=float, default=2.0, show_default=True)
+def live_events(run_id: str, interval: float) -> None:
+    """Poll deployed events as a simple live status view."""
+
+    repo = _repository()
+    seen: set[str] = set()
+    while True:
+        for row in reversed(repo.get_events(run_id, limit=100)):
+            event_id = str(row["id"])
+            if event_id in seen:
+                continue
+            seen.add(event_id)
+            click.echo(f"{row.get('created_at')} {row['agent']} {row['event_type']}")
+        time.sleep(interval)
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def artifacts(run_id: str, agent_name: str | None, as_json: bool) -> None:
+    """List deployed artifact metadata."""
+
+    rows = _repository().get_artifacts(run_id, agent_name)
+    if as_json:
+        _json_echo(rows)
+        return
+    for row in rows:
+        label = row.get("agent") or "_system"
+        click.echo(f"{row.get('created_at')} {label} {row['kind']} {row['uri']}")
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+@click.option("--metadata", is_flag=True, help="Only show artifact metadata")
+def logs(run_id: str, agent_name: str | None, as_json: bool, metadata: bool) -> None:
+    """Read artifact-backed runtime output."""
+
+    rows = [
+        row
+        for row in _repository().get_artifacts(run_id, agent_name)
+        if row["kind"] in {"runtime-output", "final-message", "setup-output", "check-output", "runtime-error"}
+    ]
+    if as_json or metadata:
+        _json_echo(rows)
+        return
+    store = _artifact_store()
+    for row in rows:
+        label = row.get("agent") or "_system"
+        click.echo(f"== {row.get('created_at')} {label} {row['kind']} ==")
+        click.echo(store.get_text(str(row["uri"])).rstrip())
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def checks(run_id: str, agent_name: str | None, as_json: bool) -> None:
+    """List deployed verification checks."""
+
+    rows = _repository().get_checks(run_id, agent_name)
+    if as_json:
+        _json_echo(rows)
+        return
+    for row in rows:
+        click.echo(f"{row.get('created_at')} {row['agent']} exit={row['exit_code']} {row['command_preview']}")
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def trace(run_id: str, agent_name: str | None, as_json: bool) -> None:
+    """Show redacted trace mirror rows."""
+
+    rows = _repository().fetch_trace_spans(run_id, agent_name)
+    if as_json:
+        _json_echo(rows)
+        return
+    if not rows:
+        click.echo("No trace spans found")
+        return
+    for row in rows:
+        label = row.get("agent") or "_system"
+        click.echo(f"{row.get('started_at')} {label} {row.get('name')} {row.get('status')} {row.get('duration_ms')}ms")
+
+
+@main.command()
+@click.argument("run_id")
+def cancel(run_id: str) -> None:
+    """Cancel a deployed run."""
+
+    repo = _repository()
+    cancelled = repo.cancel_run(run_id)
+    _coordinator().publish_cancel(run_id)
+    click.echo(f"Cancelled run {run_id}")
+    click.echo(f"Agents cancelled: {cancelled}")
+
+
+@main.command()
+@click.argument("run_id")
+def resume(run_id: str) -> None:
+    """Resume eligible deployed agents."""
+
+    repo = _repository()
+    coordinator = _coordinator()
+    resumed = repo.resume_run(run_id)
+    for item in resumed:
+        if item["status"] == "queued":
+            outbox_id = repo.record_queue_outbox(run_id, item["agent"], "agent_ready", {"run_id": run_id, "agent": item["agent"]})
+            coordinator.enqueue_agent(run_id, item["agent"])
+            repo.mark_outbox_published(outbox_id)
+    click.echo(f"Agents requeued: {len(resumed)}")
+    for item in resumed:
+        click.echo(f"  {item['agent']}: {item['status']}")
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON")
+def provenance(run_id: str, agent_name: str | None, as_json: bool) -> None:
+    """Show git provenance for a deployed run."""
+
+    rows = _repository().get_git_provenance(run_id, agent_name)
+    if as_json:
+        _json_echo(rows)
+        return
+    for row in rows:
+        label = row.get("agent") or "_system"
+        click.echo(f"{row.get('created_at')} {label} branch={row.get('branch')} head={row.get('head_sha')}")
+
+
+@main.group()
+def pr() -> None:
+    """Pull request commands."""
+
+
+@pr.command("create")
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--all", "all_agents", is_flag=True, help="Create PRs for all provenance rows")
+@click.option("--title-prefix", default="spawnd", show_default=True)
+def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefix: str) -> None:
+    """Create GitHub PRs from recorded branch provenance."""
+
+    if not agent_name and not all_agents:
+        raise click.UsageError("Pass --agent or --all")
+    rows = _repository().get_git_provenance(run_id, agent_name)
+    for row in rows:
+        branch = row.get("branch")
+        if not branch:
+            click.echo(f"Skipping {row.get('agent')}: no branch recorded", err=True)
+            continue
+        agent_label = row.get("agent") or "run"
+        title = f"{title_prefix}: {run_id}/{agent_label}"
+        body = json.dumps({"run_id": run_id, "agent": agent_label, "provenance": row}, indent=2, default=str)
+        result = subprocess.run(
+            ["gh", "pr", "create", "--head", branch, "--title", title, "--body", body],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(result.stderr.strip() or result.stdout.strip(), err=True)
+            raise click.Abort()
+        click.echo(result.stdout.strip())
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8765, show_default=True)
+def serve(host: str, port: int) -> None:
+    """Serve the deployed HTTP API."""
+
+    import uvicorn
+
+    uvicorn.run("spawnd.server:create_app", factory=True, host=host, port=port)
+
+
+@main.command()
+@click.argument("role_name", required=False)
 def roles(role_name: str | None) -> None:
     """List available roles or show role details."""
+
     if role_name:
         role = get_role(role_name)
         if not role:
-            _ = click.echo(f'Role not found: {role_name}', err=True)
-            _ = click.echo(f"Available: {', '.join(BUILTIN_ROLES.keys())}")
+            click.echo(f"Role not found: {role_name}", err=True)
+            click.echo(f"Available: {', '.join(BUILTIN_ROLES.keys())}")
             raise click.Abort()
-        _ = click.echo(f'Role: {role.name}')
-        _ = click.echo(f'Description: {role.description}')
+        click.echo(f"Role: {role.name}")
+        click.echo(f"Description: {role.description}")
         if role.model:
-            _ = click.echo(f'Default model: {role.model}')
+            click.echo(f"Default model: {role.model}")
         if role.check:
-            _ = click.echo(f'Default check: {role.check}')
-        _ = click.echo(f'\nSystem prompt:\n{role.system_prompt}')
-    else:
-        _ = click.echo('Available roles:')
-        for name, role in BUILTIN_ROLES.items():
-            _ = click.echo(f'  {name}: {role.description}')
-if __name__ == '__main__':
-    _ = main()
+            click.echo(f"Default check: {role.check}")
+        click.echo(f"\nSystem prompt:\n{role.system_prompt}")
+        return
+    click.echo("Available roles:")
+    for name, role in BUILTIN_ROLES.items():
+        click.echo(f"  {name}: {role.description}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,1119 @@
+"""Postgres-oriented repository for deployed spawnd state."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import Engine, and_, create_engine, func, insert, select, update
+
+from spawnd.artifacts.redaction import canonical_json_hash, redact_attributes, redact_env, redact_freeform_text, stable_hash
+from spawnd.models.specs import PlanSpec
+from spawnd.runtime.agent_config import resolve_agent_plan_config
+from spawnd.state import schema
+
+
+@dataclass(frozen=True)
+class ClaimedAgent:
+    """Agent claim returned to a deployed worker."""
+
+    run_id: str
+    name: str
+    attempt_id: str
+    attempt_number: int
+    type: str
+    runtime: str
+    model: str | None
+    branch: str | None
+    lease_token: str
+    worker_id: str
+
+
+class DeployedRepository:
+    """Repository boundary for deployed Postgres state.
+
+    The implementation is SQLAlchemy Core, with Postgres as the source of truth.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    @classmethod
+    def from_url(cls, database_url: str) -> 'DeployedRepository':
+        return cls(create_engine(database_url, future=True))
+
+    def create_schema(self) -> None:
+        """Create all deployed tables. Tests use this; production should use Alembic."""
+
+        schema.metadata.create_all(self.engine)
+
+    def create_run(self, plan: PlanSpec, run_id: str, *, source_repo: str | None = None, source_ref: str | None = None) -> None:
+        """Persist a run and its agents."""
+
+        spec = plan.model_dump(mode='json')
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.runs).values(
+                    run_id=run_id,
+                    name=plan.name,
+                    spec=spec,
+                    spec_hash=canonical_json_hash(spec),
+                    submitted_via='api',
+                    status='queued',
+                    max_cost_usd=plan.cost_budget.total_usd if plan.cost_budget else 25.0,
+                    source_repo=source_repo,
+                    source_ref=source_ref,
+                )
+            )
+            for agent in plan.agents:
+                resolved = resolve_agent_plan_config(agent, plan.defaults)
+                status = 'queued' if not agent.depends_on else 'pending'
+                conn.execute(
+                    insert(schema.agents).values(
+                        run_id=run_id,
+                        name=agent.name,
+                        plan_name=plan.name,
+                        status=status,
+                        type=agent.type,
+                        runtime=resolved.runtime,
+                        model=resolved.model,
+                        prompt_hash=stable_hash(resolved.prompt),
+                        prompt_preview=redact_freeform_text(resolved.prompt[:500]),
+                        check_command_hash=stable_hash(resolved.check_command or ''),
+                        check_command_preview=redact_freeform_text((resolved.check_command or 'true')[:500]),
+                        branch=f'spawnd/{run_id}/{agent.name}',
+                        depends_on=list(agent.depends_on),
+                        on_failure=resolved.on_failure,
+                        retry_count=resolved.retry_count,
+                        max_cost_usd=resolved.max_cost_usd,
+                        cost_source=resolved.cost_source,
+                        env_metadata=redact_env(agent.env),
+                        max_subagents=resolved.manager_cap,
+                    )
+                )
+            _ = self.append_event_in_transaction(conn, run_id, '_system', 'run_created', {'agent_count': len(plan.agents)})
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(schema.runs).where(schema.runs.c.run_id == run_id)).mappings().first()
+            return dict(row) if row else None
+
+    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(schema.runs)
+                .order_by(schema.runs.c.created_at.desc())
+                .limit(limit)
+            ).mappings().all()
+            return [dict(row) for row in rows]
+
+    def get_agents(self, run_id: str) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id).order_by(schema.agents.c.created_at)).mappings().all()
+            return [dict(row) for row in rows]
+
+    def get_agent(self, run_id: str, agent_name: str) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(schema.agents).where(
+                    and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name)
+                )
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def get_events(self, run_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(schema.events)
+                .where(schema.events.c.run_id == run_id)
+                .order_by(schema.events.c.created_at.desc())
+                .limit(limit)
+            ).mappings().all()
+            return [dict(row) for row in rows]
+
+    def get_pending_clarifications(self, run_id: str, *, agent_prefix: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(schema.events)
+                .where(
+                    and_(
+                        schema.events.c.run_id == run_id,
+                        schema.events.c.event_type.in_(["clarification", "blocker"]),
+                    )
+                )
+                .order_by(schema.events.c.created_at)
+            ).mappings().all()
+            results: list[dict[str, Any]] = []
+            for row in rows:
+                if agent_prefix and not str(row["agent"]).startswith(agent_prefix):
+                    continue
+                response = conn.execute(
+                    select(schema.responses.c.id).where(
+                        and_(
+                            schema.responses.c.run_id == run_id,
+                            schema.responses.c.clarification_id == row["id"],
+                            schema.responses.c.consumed == False,  # noqa: E712
+                        )
+                    )
+                ).first()
+                if response is None:
+                    results.append(dict(row))
+            return results
+
+    def record_response(self, run_id: str, clarification_id: str, response: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.responses).values(
+                    run_id=run_id,
+                    clarification_id=clarification_id,
+                    response=redact_freeform_text(response),
+                    consumed=False,
+                )
+            )
+
+    def get_response(self, run_id: str, clarification_id: str) -> dict[str, Any] | None:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(schema.responses)
+                .where(
+                    and_(
+                        schema.responses.c.run_id == run_id,
+                        schema.responses.c.clarification_id == clarification_id,
+                        schema.responses.c.consumed == False,  # noqa: E712
+                    )
+                )
+                .order_by(schema.responses.c.created_at)
+                .limit(1)
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def consume_response(self, response_id: int) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(schema.responses).where(schema.responses.c.id == response_id).values(consumed=True))
+
+    def cancel_agent(self, run_id: str, agent_name: str, error: str = "Agent cancelled") -> bool:
+        terminal = {"completed", "failed", "timeout", "cancelled", "cost_exceeded"}
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(schema.agents.c.status).where(
+                    and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name)
+                )
+            ).mappings().first()
+            if row is None or row["status"] in terminal:
+                return False
+            conn.execute(
+                update(schema.agents)
+                .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
+                .values(status="cancelled", error=error, lease_token=None, leased_until=None, updated_at=now)
+            )
+            self.append_event_in_transaction(conn, run_id, agent_name, "agent_cancelled", {"error": error})
+            return True
+
+    def ready_agents(self, run_id: str) -> list[str]:
+        """Return queued agents ready for Redis enqueue."""
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(schema.agents.c.name).where(
+                    and_(schema.agents.c.run_id == run_id, schema.agents.c.status == 'queued')
+                )
+            ).all()
+            return [row[0] for row in rows]
+
+    def mark_newly_ready_agents(self, run_id: str) -> list[str]:
+        """Move pending agents whose dependencies completed to queued."""
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id)).mappings().all()
+            completed = {row['name'] for row in rows if row['status'] == 'completed'}
+            ready = [
+                row['name']
+                for row in rows
+                if row['status'] == 'pending' and all(dep in completed for dep in (row['depends_on'] or []))
+            ]
+            for name in ready:
+                conn.execute(
+                    update(schema.agents)
+                    .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == name))
+                    .values(status='queued', updated_at=datetime.now(timezone.utc))
+                )
+                _ = self.append_event_in_transaction(conn, run_id, name, 'agent_queued', {'reason': 'dependencies_completed'})
+            return ready
+
+    def claim_agent(self, run_id: str, agent_name: str, *, worker_id: str, lease_seconds: int = 300) -> ClaimedAgent | None:
+        """Atomically claim a queued agent for a worker."""
+
+        lease_token = uuid4().hex
+        attempt_id = uuid4().hex
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(schema.agents)
+                .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
+                .with_for_update()
+            ).mappings().first()
+            if row is None or row['status'] != 'queued':
+                return None
+            attempt_number = int(
+                conn.execute(
+                    select(func.coalesce(func.max(schema.agent_attempts.c.attempt_number), 0)).where(
+                        and_(
+                            schema.agent_attempts.c.run_id == run_id,
+                            schema.agent_attempts.c.agent == agent_name,
+                        )
+                    )
+                ).scalar_one()
+            ) + 1
+            result = conn.execute(
+                update(schema.agents)
+                .where(
+                    and_(
+                        schema.agents.c.run_id == run_id,
+                        schema.agents.c.name == agent_name,
+                        schema.agents.c.status == 'queued',
+                    )
+                )
+                .values(
+                    status='running',
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    leased_until=now + timedelta(seconds=lease_seconds),
+                    heartbeat_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            conn.execute(
+                insert(schema.agent_attempts).values(
+                    id=attempt_id,
+                    run_id=run_id,
+                    agent=agent_name,
+                    attempt_number=attempt_number,
+                    runtime=row['runtime'],
+                    model=row['model'],
+                    status='running',
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    leased_until=now + timedelta(seconds=lease_seconds),
+                    heartbeat_at=now,
+                    started_at=now,
+                )
+            )
+            _ = self.append_event_in_transaction(
+                conn,
+                run_id,
+                agent_name,
+                'agent_claimed',
+                {'worker_id': worker_id, 'lease_seconds': lease_seconds},
+            )
+            return ClaimedAgent(
+                run_id=run_id,
+                name=agent_name,
+                attempt_id=attempt_id,
+                attempt_number=attempt_number,
+                type=row['type'],
+                runtime=row['runtime'],
+                model=row['model'],
+                branch=row['branch'],
+                lease_token=lease_token,
+                worker_id=worker_id,
+            )
+
+    def renew_lease(self, run_id: str, agent_name: str, *, worker_id: str, lease_token: str, lease_seconds: int = 300) -> bool:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(schema.agents)
+                .where(
+                    and_(
+                        schema.agents.c.run_id == run_id,
+                        schema.agents.c.name == agent_name,
+                        schema.agents.c.worker_id == worker_id,
+                        schema.agents.c.lease_token == lease_token,
+                        schema.agents.c.status == 'running',
+                    )
+                )
+                .values(leased_until=now + timedelta(seconds=lease_seconds), heartbeat_at=now, updated_at=now)
+            )
+            if result.rowcount == 1:
+                conn.execute(
+                    update(schema.agent_attempts)
+                    .where(
+                        and_(
+                            schema.agent_attempts.c.run_id == run_id,
+                            schema.agent_attempts.c.agent == agent_name,
+                            schema.agent_attempts.c.worker_id == worker_id,
+                            schema.agent_attempts.c.lease_token == lease_token,
+                            schema.agent_attempts.c.status == 'running',
+                        )
+                    )
+                    .values(
+                        leased_until=now + timedelta(seconds=lease_seconds),
+                        heartbeat_at=now,
+                        updated_at=now,
+                    )
+                )
+            return result.rowcount == 1
+
+    def complete_agent(self, run_id: str, agent_name: str, *, cost_usd: float = 0.0, input_tokens: int = 0, output_tokens: int = 0, attempt_id: str | None = None) -> list[str]:
+        """Mark an agent complete and queue newly unblocked dependents."""
+
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(schema.agents)
+                .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
+                .values(
+                    status='completed',
+                    cost_usd=cost_usd,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    lease_token=None,
+                    leased_until=None,
+                    worker_id=None,
+                    updated_at=now,
+                )
+            )
+            if attempt_id:
+                conn.execute(
+                    update(schema.agent_attempts)
+                    .where(schema.agent_attempts.c.id == attempt_id)
+                    .values(status='completed', finished_at=now, updated_at=now)
+                )
+            _ = self.append_event_in_transaction(conn, run_id, agent_name, 'done', {'cost_usd': cost_usd})
+        ready = self.mark_newly_ready_agents(run_id)
+        self.refresh_run_status(run_id)
+        return ready
+
+    def fail_agent(self, run_id: str, agent_name: str, error: str, *, attempt_id: str | None = None, error_id: str | None = None) -> None:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(schema.agents)
+                .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
+                .values(
+                    status='failed',
+                    error=error[:1000],
+                    last_error=error[:1000],
+                    lease_token=None,
+                    leased_until=None,
+                    worker_id=None,
+                    heartbeat_at=None,
+                    updated_at=now,
+                )
+            )
+            if attempt_id:
+                conn.execute(
+                    update(schema.agent_attempts)
+                    .where(schema.agent_attempts.c.id == attempt_id)
+                    .values(status='failed', finished_at=now, error_id=error_id, updated_at=now)
+                )
+            _ = self.append_event_in_transaction(conn, run_id, agent_name, 'error', {'error': error[:1000]})
+        self.refresh_run_status(run_id)
+
+    def cancel_run(self, run_id: str) -> int:
+        """Cancel a run and all non-terminal agents. Returns affected agents."""
+
+        terminal = {'completed', 'failed', 'timeout', 'cancelled', 'cost_exceeded'}
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            conn.execute(update(schema.runs).where(schema.runs.c.run_id == run_id).values(status='cancelled', updated_at=now))
+            rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id)).mappings().all()
+            names = [row['name'] for row in rows if row['status'] not in terminal]
+            for name in names:
+                conn.execute(
+                    update(schema.agents)
+                    .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == name))
+                    .values(status='cancelled', error='Run cancelled', lease_token=None, leased_until=None, updated_at=now)
+                )
+            _ = self.append_event_in_transaction(conn, run_id, '_system', 'run_cancelled', {'cancelled_agents': names})
+            return len(names)
+
+    def refresh_run_status(self, run_id: str) -> str | None:
+        """Recompute aggregate run status from canonical agent rows."""
+
+        terminal = {'completed', 'failed', 'timeout', 'cancelled', 'cost_exceeded'}
+        with self.engine.begin() as conn:
+            run = conn.execute(select(schema.runs).where(schema.runs.c.run_id == run_id)).mappings().first()
+            if run is None:
+                return None
+            if run['status'] == 'cancelled':
+                return 'cancelled'
+            rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id)).mappings().all()
+            statuses = [row['status'] for row in rows]
+            if not statuses:
+                next_status = str(run['status'])
+            elif all(status == 'completed' for status in statuses):
+                next_status = 'completed'
+            elif all(status in terminal for status in statuses):
+                next_status = 'failed' if any(status in {'failed', 'timeout', 'cost_exceeded'} for status in statuses) else 'cancelled'
+            elif any(status == 'running' for status in statuses):
+                next_status = 'running'
+            else:
+                next_status = 'queued'
+            total_cost = float(
+                conn.execute(
+                    select(func.coalesce(func.sum(schema.agents.c.cost_usd), 0.0)).where(schema.agents.c.run_id == run_id)
+                ).scalar_one()
+            )
+            conn.execute(
+                update(schema.runs)
+                .where(schema.runs.c.run_id == run_id)
+                .values(status=next_status, total_cost_usd=total_cost, updated_at=datetime.now(timezone.utc))
+            )
+            return next_status
+
+    def resume_run(self, run_id: str) -> list[dict[str, Any]]:
+        """Requeue agents that are eligible for a deployed retry/resume."""
+
+        now = datetime.now(timezone.utc)
+        resumed: list[dict[str, Any]] = []
+        with self.engine.begin() as conn:
+            rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id)).mappings().all()
+            completed = {row['name'] for row in rows if row['status'] == 'completed'}
+            for row in rows:
+                retryable_failure = row['status'] in {'failed', 'timeout'} and row['on_failure'] == 'retry' and int(row['retry_attempt'] or 0) < int(row['retry_count'] or 0)
+                paused = row['status'] == 'paused'
+                if not retryable_failure and not paused:
+                    continue
+                next_status = 'queued' if all(dep in completed for dep in (row['depends_on'] or [])) else 'pending'
+                values = {
+                    'status': next_status,
+                    'error': None,
+                    'lease_token': None,
+                    'leased_until': None,
+                    'worker_id': None,
+                    'heartbeat_at': None,
+                    'updated_at': now,
+                }
+                if retryable_failure:
+                    values['retry_attempt'] = int(row['retry_attempt'] or 0) + 1
+                conn.execute(
+                    update(schema.agents)
+                    .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == row['name']))
+                    .values(**values)
+                )
+                _ = self.append_event_in_transaction(conn, run_id, row['name'], 'agent_resumed', {'status': next_status})
+                resumed.append({'run_id': run_id, 'agent': row['name'], 'status': next_status})
+            if resumed:
+                conn.execute(update(schema.runs).where(schema.runs.c.run_id == run_id).values(status='queued', updated_at=now))
+        if resumed:
+            self.mark_newly_ready_agents(run_id)
+            self.refresh_run_status(run_id)
+        return resumed
+
+    def update_agent_worktree(self, run_id: str, agent_name: str, *, worktree_locator: str, branch: str | None = None) -> None:
+        values: dict[str, Any] = {
+            'worktree_locator': worktree_locator,
+            'updated_at': datetime.now(timezone.utc),
+        }
+        if branch is not None:
+            values['branch'] = branch
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(schema.agents)
+                .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
+                .values(**values)
+            )
+
+    def record_worker_heartbeat(self, worker_id: str, *, hostname: str | None = None, version: str | None = None, capacity: dict[str, Any] | None = None, status: str = 'active') -> None:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                select(schema.worker_nodes.c.worker_id).where(schema.worker_nodes.c.worker_id == worker_id)
+            ).scalar_one_or_none()
+            values = {
+                'hostname': hostname,
+                'version': version,
+                'heartbeat_at': now,
+                'capacity': redact_attributes(capacity or {}),
+                'status': status,
+            }
+            if existing:
+                conn.execute(update(schema.worker_nodes).where(schema.worker_nodes.c.worker_id == worker_id).values(**values))
+            else:
+                conn.execute(insert(schema.worker_nodes).values(worker_id=worker_id, started_at=now, **values))
+
+    def record_runtime_session(
+        self,
+        *,
+        attempt_id: str,
+        run_id: str,
+        agent: str,
+        provider: str,
+        runtime: str,
+        model: str | None = None,
+        provider_session_id: str | None = None,
+        provider_thread_id: str | None = None,
+        cwd_locator: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        session_id = uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.runtime_sessions).values(
+                    id=session_id,
+                    attempt_id=attempt_id,
+                    run_id=run_id,
+                    agent=agent,
+                    provider=provider,
+                    runtime=runtime,
+                    provider_session_id=provider_session_id,
+                    provider_thread_id=provider_thread_id,
+                    cwd_locator=cwd_locator,
+                    model=model,
+                    metadata=redact_attributes(metadata or {}),
+                )
+            )
+        return session_id
+
+    def get_attempts(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.agent_attempts).where(schema.agent_attempts.c.run_id == run_id).order_by(schema.agent_attempts.c.started_at)
+            if agent:
+                stmt = stmt.where(schema.agent_attempts.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def get_runtime_sessions(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.runtime_sessions).where(schema.runtime_sessions.c.run_id == run_id).order_by(schema.runtime_sessions.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.runtime_sessions.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def get_runtime_invocations(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.runtime_invocations).where(schema.runtime_invocations.c.run_id == run_id).order_by(schema.runtime_invocations.c.started_at)
+            if agent:
+                stmt = stmt.where(schema.runtime_invocations.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def get_runtime_errors(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.runtime_errors).where(schema.runtime_errors.c.run_id == run_id).order_by(schema.runtime_errors.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.runtime_errors.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def get_token_usage(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.token_usage).where(schema.token_usage.c.run_id == run_id).order_by(schema.token_usage.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.token_usage.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def get_cost_usage(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.cost_usage).where(schema.cost_usage.c.run_id == run_id).order_by(schema.cost_usage.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.cost_usage.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def start_runtime_invocation(
+        self,
+        *,
+        attempt_id: str,
+        run_id: str,
+        agent: str,
+        kind: str,
+        session_id: str | None = None,
+        provider_turn_id: str | None = None,
+    ) -> str:
+        invocation_id = uuid4().hex
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            scope_column = schema.runtime_invocations.c.session_id if session_id else schema.runtime_invocations.c.attempt_id
+            scope_value = session_id or attempt_id
+            sequence = int(
+                conn.execute(
+                    select(func.coalesce(func.max(schema.runtime_invocations.c.sequence), 0)).where(scope_column == scope_value)
+                ).scalar_one()
+            ) + 1
+            conn.execute(
+                insert(schema.runtime_invocations).values(
+                    id=invocation_id,
+                    session_id=session_id,
+                    attempt_id=attempt_id,
+                    run_id=run_id,
+                    agent=agent,
+                    provider_turn_id=provider_turn_id,
+                    sequence=sequence,
+                    kind=kind,
+                    status='running',
+                    started_at=now,
+                    is_error=False,
+                )
+            )
+        return invocation_id
+
+    def finish_runtime_invocation(
+        self,
+        invocation_id: str,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        stop_reason: str | None = None,
+        final_message_artifact_id: str | None = None,
+        final_message_hash: str | None = None,
+        error_id: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(schema.runtime_invocations.c.started_at).where(schema.runtime_invocations.c.id == invocation_id)
+            ).mappings().first()
+            started_at = row['started_at'] if row else now
+            if isinstance(started_at, str):
+                started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            duration_ms = max(0, int((now - started_at).total_seconds() * 1000))
+            conn.execute(
+                update(schema.runtime_invocations)
+                .where(schema.runtime_invocations.c.id == invocation_id)
+                .values(
+                    status=status,
+                    completed_at=now,
+                    duration_ms=duration_ms,
+                    exit_code=exit_code,
+                    stop_reason=stop_reason,
+                    is_error=status not in {'ok', 'completed', 'success'},
+                    error_id=error_id,
+                    final_message_artifact_id=final_message_artifact_id,
+                    final_message_hash=final_message_hash,
+                )
+            )
+
+    def record_runtime_error(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        source: str,
+        message: str,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
+        code: str | None = None,
+        details_artifact_id: str | None = None,
+        retryable: bool | None = None,
+    ) -> str:
+        error_id = uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.runtime_errors).values(
+                    id=error_id,
+                    run_id=run_id,
+                    agent=agent,
+                    attempt_id=attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    source=source,
+                    code=code,
+                    message_hash=stable_hash(message),
+                    message_preview=redact_freeform_text(message[:1000]),
+                    details_artifact_id=details_artifact_id,
+                    retryable=retryable,
+                )
+            )
+        return error_id
+
+    def record_token_usage(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        provider: str,
+        scope: str,
+        model: str | None = None,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        reasoning_output_tokens: int = 0,
+        context_window: int | None = None,
+        raw_usage: dict[str, Any] | None = None,
+    ) -> None:
+        total_tokens = input_tokens + output_tokens + cached_input_tokens + reasoning_output_tokens
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.token_usage).values(
+                    id=uuid4().hex,
+                    run_id=run_id,
+                    agent=agent,
+                    attempt_id=attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    provider=provider,
+                    model=model,
+                    scope=scope,
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    output_tokens=output_tokens,
+                    reasoning_output_tokens=reasoning_output_tokens,
+                    total_tokens=total_tokens,
+                    context_window=context_window,
+                    raw_usage=redact_attributes(raw_usage or {}),
+                )
+            )
+
+    def record_cost_usage(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        provider: str,
+        amount_usd: float,
+        source: str,
+        model: str | None = None,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
+        raw_cost: dict[str, Any] | None = None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.cost_usage).values(
+                    id=uuid4().hex,
+                    run_id=run_id,
+                    agent=agent,
+                    attempt_id=attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    provider=provider,
+                    model=model,
+                    amount_usd=amount_usd,
+                    source=source,
+                    raw_cost=redact_attributes(raw_cost or {}),
+                )
+            )
+
+    def record_provider_event(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        provider: str,
+        runtime: str,
+        event_name: str,
+        sequence: int,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
+        provider_event_id: str | None = None,
+        provider_thread_id: str | None = None,
+        provider_turn_id: str | None = None,
+        provider_message_id: str | None = None,
+        payload_schema: str | None = None,
+        payload_version: str | None = None,
+        payload_preview: dict[str, Any] | None = None,
+        payload_artifact_id: str | None = None,
+    ) -> str:
+        event_id = uuid4().hex
+        payload = redact_attributes(payload_preview or {})
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.provider_events).values(
+                    id=event_id,
+                    run_id=run_id,
+                    agent=agent,
+                    attempt_id=attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    provider=provider,
+                    runtime=runtime,
+                    event_name=event_name,
+                    provider_event_id=provider_event_id,
+                    provider_thread_id=provider_thread_id,
+                    provider_turn_id=provider_turn_id,
+                    provider_message_id=provider_message_id,
+                    sequence=sequence,
+                    payload_schema=payload_schema,
+                    payload_version=payload_version,
+                    payload_hash=canonical_json_hash(payload),
+                    payload_preview=payload,
+                    payload_artifact_id=payload_artifact_id,
+                )
+            )
+        return event_id
+
+    def record_queue_outbox(self, run_id: str, agent: str | None, event_type: str, payload: dict[str, Any]) -> str:
+        outbox_id = uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.queue_outbox).values(
+                    id=outbox_id,
+                    run_id=run_id,
+                    agent=agent,
+                    event_type=event_type,
+                    payload=redact_attributes(payload),
+                    status='pending',
+                )
+            )
+        return outbox_id
+
+    def mark_outbox_published(self, outbox_id: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(schema.queue_outbox)
+                .where(schema.queue_outbox.c.id == outbox_id)
+                .values(status='published', published_at=datetime.now(timezone.utc))
+            )
+
+    def expire_stale_leases(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Expire running agents whose Postgres lease is stale.
+
+        Returns agents requeued by the expiration pass.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        requeued: list[dict[str, Any]] = []
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(schema.agents).where(
+                    and_(
+                        schema.agents.c.status == 'running',
+                        schema.agents.c.leased_until.is_not(None),
+                        schema.agents.c.leased_until < now,
+                    )
+                )
+            ).mappings().all()
+            for row in rows:
+                can_retry = row['on_failure'] == 'retry' and int(row['retry_attempt'] or 0) < int(row['retry_count'] or 0)
+                new_status = 'queued' if can_retry else 'failed'
+                values = {
+                    'status': new_status,
+                    'lease_token': None,
+                    'leased_until': None,
+                    'worker_id': None,
+                    'heartbeat_at': None,
+                    'updated_at': now,
+                }
+                if can_retry:
+                    values['retry_attempt'] = int(row['retry_attempt'] or 0) + 1
+                    values['last_error'] = 'Lease expired'
+                else:
+                    values['error'] = 'Lease expired'
+                    values['last_error'] = 'Lease expired'
+                conn.execute(
+                    update(schema.agents)
+                    .where(and_(schema.agents.c.run_id == row['run_id'], schema.agents.c.name == row['name']))
+                    .values(**values)
+                )
+                attempt = conn.execute(
+                    select(schema.agent_attempts)
+                    .where(
+                        and_(
+                            schema.agent_attempts.c.run_id == row['run_id'],
+                            schema.agent_attempts.c.agent == row['name'],
+                            schema.agent_attempts.c.status == 'running',
+                        )
+                    )
+                    .order_by(schema.agent_attempts.c.attempt_number.desc())
+                    .limit(1)
+                ).mappings().first()
+                if attempt:
+                    conn.execute(
+                        update(schema.agent_attempts)
+                        .where(schema.agent_attempts.c.id == attempt['id'])
+                        .values(status='expired', finished_at=now, updated_at=now)
+                    )
+                _ = self.append_event_in_transaction(conn, row['run_id'], row['name'], 'lease_expired', {'requeued': can_retry})
+                if can_retry:
+                    requeued.append({'run_id': row['run_id'], 'agent': row['name']})
+        return requeued
+
+    def append_event(
+        self,
+        run_id: str,
+        agent: str,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+    ) -> str:
+        """Append a redacted event in its own transaction."""
+
+        with self.engine.begin() as conn:
+            return self.append_event_in_transaction(conn, run_id, agent, event_type, data)
+
+    def append_event_in_transaction(
+        self,
+        conn: Any,
+        run_id: str,
+        agent: str,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+    ) -> str:
+        """Append a redacted event using an existing transaction."""
+        event_id = uuid4().hex
+        conn.execute(
+            insert(schema.events).values(
+                id=event_id,
+                run_id=run_id,
+                agent=agent,
+                event_type=event_type,
+                data=redact_attributes(data or {}),
+            )
+        )
+        return event_id
+
+    def record_trace_span(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        trace_id: str,
+        span_id: str,
+        parent_span_id: str | None,
+        name: str,
+        status: str,
+        started_at: datetime,
+        ended_at: datetime,
+        attributes: dict[str, Any],
+        events: list[dict[str, Any]] | None = None,
+        export_status: str = 'mirrored',
+    ) -> None:
+        duration_ms = max(0, int((ended_at - started_at).total_seconds() * 1000))
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.trace_spans).values(
+                    run_id=run_id,
+                    agent=agent,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    parent_span_id=parent_span_id,
+                    name=name,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_ms=duration_ms,
+                    attributes=redact_attributes(attributes),
+                    events=[redact_attributes(event) for event in events or []],
+                    export_status=export_status,
+                )
+            )
+
+    def fetch_trace_spans(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.trace_spans).where(schema.trace_spans.c.run_id == run_id).order_by(schema.trace_spans.c.started_at)
+            if agent:
+                stmt = stmt.where(schema.trace_spans.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def record_artifact(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        kind: str,
+        uri: str,
+        sha256: str,
+        size_bytes: int,
+        redaction_policy: str,
+        content_type: str,
+    ) -> str:
+        artifact_id = uuid4().hex
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.artifacts).values(
+                    id=artifact_id,
+                    run_id=run_id,
+                    agent=agent,
+                    kind=kind,
+                    uri=uri,
+                    sha256=sha256,
+                    size_bytes=size_bytes,
+                    redaction_policy=redaction_policy,
+                    content_type=content_type,
+                )
+            )
+        return artifact_id
+
+    def get_artifacts(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.artifacts).where(schema.artifacts.c.run_id == run_id).order_by(schema.artifacts.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.artifacts.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def record_check(
+        self,
+        *,
+        run_id: str,
+        agent: str,
+        command: str,
+        exit_code: int,
+        duration_ms: int,
+        output_artifact_id: str | None = None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.checks).values(
+                    run_id=run_id,
+                    agent=agent,
+                    command_hash=stable_hash(command),
+                    command_preview=redact_freeform_text(command[:500]),
+                    exit_code=exit_code,
+                    duration_ms=duration_ms,
+                    output_artifact_id=output_artifact_id,
+                )
+            )
+
+    def get_checks(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.checks).where(schema.checks.c.run_id == run_id).order_by(schema.checks.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.checks.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def record_git_provenance(
+        self,
+        *,
+        run_id: str,
+        agent: str | None,
+        diff_stats: dict[str, Any],
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+        branch: str | None = None,
+        commit_sha: str | None = None,
+        pr_url: str | None = None,
+        pr_number: int | None = None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.git_provenance).values(
+                    run_id=run_id,
+                    agent=agent,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                    pr_url=pr_url,
+                    pr_number=pr_number,
+                    diff_stats=redact_attributes(diff_stats),
+                )
+            )
+
+    def get_git_provenance(self, run_id: str, agent: str | None = None) -> list[dict[str, Any]]:
+        with self.engine.connect() as conn:
+            stmt = select(schema.git_provenance).where(schema.git_provenance.c.run_id == run_id).order_by(schema.git_provenance.c.created_at)
+            if agent:
+                stmt = stmt.where(schema.git_provenance.c.agent == agent)
+            return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def telemetry_summary(self, run_id: str) -> dict[str, Any]:
+        with self.engine.connect() as conn:
+            span_count = conn.execute(
+                select(schema.trace_spans.c.id).where(schema.trace_spans.c.run_id == run_id)
+            ).all()
+            last_error = conn.execute(
+                select(schema.events.c.data)
+                .where(and_(schema.events.c.run_id == run_id, schema.events.c.event_type == 'telemetry_error'))
+                .order_by(schema.events.c.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            return {'trace_span_count': len(span_count), 'last_telemetry_error': last_error}

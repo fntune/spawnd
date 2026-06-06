@@ -1,15 +1,7 @@
-"""Agent execution dispatch.
-
-The scheduler calls ``spawn_worker`` / ``spawn_manager`` with an
-``AgentConfig``. This module builds the appropriate ``Toolset`` and
-dispatches to the registered ``Executor`` for ``config.runtime``. The
-actual vendor integration lives in ``spawnd.runtime.executors``.
-"""
+"""Agent execution dispatch for deployed workers."""
 import asyncio
 import logging
-import subprocess
 from spawnd.runtime.agent_run import AgentConfig
-from spawnd.storage.db import insert_event, open_db, update_agent_status
 from spawnd.tools.toolset import manager_toolset, worker_toolset
 logger = logging.getLogger('spawnd.executor')
 _executors_loaded = False
@@ -49,32 +41,14 @@ async def run_manager(config: AgentConfig) -> dict:
 
 async def run_worker_mock(config: AgentConfig) -> dict:
     """Mock worker for testing without any vendor SDK."""
-    db = open_db(config.run_id)
     try:
-        _ = update_agent_status(db, config.run_id, config.name, 'running')
-        _ = insert_event(db, config.run_id, config.name, 'started', {'prompt': config.prompt[:200]})
-        await asyncio.sleep(0.5)
-        result = subprocess.run(config.check_command, shell=True, cwd=str(config.worktree), capture_output=True, text=True)
-        if result.returncode == 0:
-            _ = update_agent_status(db, config.run_id, config.name, 'completed')
-            _ = insert_event(db, config.run_id, config.name, 'done', {'summary': 'Mock task completed'})
-            return {'success': True, 'status': 'completed'}
-        _ = update_agent_status(db, config.run_id, config.name, 'failed', result.stderr[:500])
-        _ = insert_event(db, config.run_id, config.name, 'error', {'error': result.stderr[:200]})
-        return {'success': False, 'status': 'failed', 'error': result.stderr[:500]}
+        config.observer.event('started', {'runtime': 'fake'})
+        await asyncio.sleep(0.05)
+        message = f"Fake runtime completed {config.name}"
+        config.observer.final(message)
+        config.observer.usage(source='fake')
+        return {'success': True, 'status': 'completed', 'final_message': message, 'cost': 0.0, 'cost_source': 'fake'}
     except Exception as e:
-        logger.error(f"Mock worker {config.name} failed: {e}")
-        _ = update_agent_status(db, config.run_id, config.name, 'failed', str(e))
-        return {'success': False, 'status': 'failed', 'error': str(e)}
-    finally:
-        db.close()
-
-def spawn_worker(config: AgentConfig, use_mock: bool=False) -> asyncio.Task:
-    """Spawn a worker agent as an asyncio task."""
-    if use_mock:
-        return asyncio.create_task(run_worker_mock(config), name=f'worker-{config.name}')
-    return asyncio.create_task(run_worker(config), name=f'worker-{config.name}')
-
-def spawn_manager(config: AgentConfig) -> asyncio.Task:
-    """Spawn a manager agent as an asyncio task."""
-    return asyncio.create_task(run_manager(config), name=f'manager-{config.name}')
+        logger.error(f"Fake worker {config.name} failed: {e}")
+        config.observer.error('fake_runtime', str(e))
+        return {'success': False, 'status': 'failed', 'error': str(e), 'cost': 0.0, 'cost_source': 'fake'}

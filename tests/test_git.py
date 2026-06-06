@@ -1,7 +1,7 @@
 """Tests for git module - worktree operations."""
 import subprocess
 import pytest
-from spawnd.gitops.worktrees import create_worktree, get_current_branch, merge_branch, merge_branch_to_current, remove_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
+from spawnd.gitops.worktrees import create_worktree, get_current_branch, merge_branch, remove_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
 
 @pytest.fixture
 def git_repo(tmp_path):
@@ -76,18 +76,6 @@ def test_merge_branch_success(git_repo, monkeypatch):
     result = merge_branch(worktree2, 'spawnd/test-run/feature', 'Merge feature')
     assert result is True
     assert (worktree2 / 'feature.txt').exists()
-
-def test_merge_branch_to_current(git_repo, monkeypatch):
-    """Test merge into current branch."""
-    _ = monkeypatch.chdir(git_repo)
-    _ = subprocess.run(['git', 'checkout', '-b', 'feature'], cwd=git_repo, check=True, capture_output=True)
-    _ = (git_repo / 'feature.txt').write_text('feature content')
-    _ = subprocess.run(['git', 'add', '.'], cwd=git_repo, check=True, capture_output=True)
-    _ = subprocess.run(['git', 'commit', '-m', 'Add feature'], cwd=git_repo, check=True, capture_output=True)
-    _ = subprocess.run(['git', 'checkout', '-'], cwd=git_repo, check=True, capture_output=True)
-    result = merge_branch_to_current('feature', repo_path=git_repo)
-    assert result is True
-    assert (git_repo / 'feature.txt').exists()
 
 def test_run_git_command(git_repo):
     """Test run_git helper."""

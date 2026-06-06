@@ -1,9 +1,8 @@
 """Executor ABC and runtime registry.
 
-An ``Executor`` drives one vendor's agent SDK. Given an ``AgentConfig``
-(what to run) and a ``Toolset`` (what tools the agent may use), the
-executor spawns the vendor client, streams iterations, persists status
-and cost to SQLite, and returns a result dict the scheduler consumes.
+An ``Executor`` drives one vendor runtime. Given an ``AgentConfig`` and a
+``Toolset``, it runs the provider integration and returns provider facts. The
+deployed worker owns persistence, artifacts, checks, and final state changes.
 """
 from __future__ import annotations
 from abc import ABC, abstractmethod
@@ -20,8 +19,8 @@ class Executor(ABC):
 
     Subclasses declare the ``runtime`` identifier they handle and implement
     ``run(config, toolset) -> dict``. The dict keys expected by the
-    scheduler are ``success: bool``, ``status: str``, ``cost: float``,
-    and optionally ``error: str`` and ``vendor_session_id: str | None``.
+    worker are ``success: bool``, ``status: str``, ``cost: float``, and
+    optionally ``error: str`` and ``vendor_session_id: str | None``.
     """
     runtime: ClassVar[str]
 

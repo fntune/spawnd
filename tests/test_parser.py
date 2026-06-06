@@ -42,6 +42,18 @@ def test_parse_plan_yaml_accepts_codex_runtime():
     assert plan.agents[0].runtime is None
     assert plan.agents[1].runtime == 'codex'
 
+def test_parse_plan_yaml_with_deployed_observability_config():
+    """Parse deployed telemetry and artifact orchestration config."""
+    yaml_content = '\nname: deployed-plan\norchestration:\n  telemetry:\n    enabled: true\n    exporter: otlp\n    capture: full\n    failure_policy: fail\n  artifacts:\n    capture_raw: false\nagents:\n  - name: worker1\n    prompt: Do something\n'
+    plan = parse_plan_yaml(yaml_content)
+    assert plan.orchestration is not None
+    assert plan.orchestration.telemetry is not None
+    assert plan.orchestration.telemetry.enabled is True
+    assert plan.orchestration.telemetry.exporter == 'otlp'
+    assert plan.orchestration.telemetry.failure_policy == 'fail'
+    assert plan.orchestration.artifacts is not None
+    assert plan.orchestration.artifacts.capture_raw is False
+
 def test_parse_plan_yaml_rejects_invalid_agent_name():
     """Agent names should fail validation before runtime git operations."""
     yaml_content = '\nname: bad-plan\nagents:\n  - name: "bad name"\n    prompt: Do something\n'

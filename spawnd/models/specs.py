@@ -46,15 +46,16 @@ class WorktreeSource(BaseModel):
     base_ref: str | None = None
     fetch: bool = False
 
-class MergeConfig(BaseModel):
-    """Merge settings."""
-    target_branch: str | None = None
-    strategy: Literal['bottom_up', 'root_only'] = 'bottom_up'
-    on_conflict: Literal['spawn_resolver', 'fail', 'manual'] = 'manual'
-    resolver_timeout: int = 120
-    resolver_max_cost: float = 2.0
-    fallback: Literal['manual', 'fail'] = 'manual'
-    auto_cleanup: bool = True
+class TelemetryConfig(BaseModel):
+    """External telemetry and local trace mirror settings."""
+    enabled: bool = False
+    exporter: Literal['none', 'otlp'] = 'none'
+    capture: Literal['orchestrator', 'full'] = 'full'
+    failure_policy: Literal['degrade', 'fail'] = 'degrade'
+
+class ArtifactConfig(BaseModel):
+    """Durable artifact capture settings for deployed runs."""
+    capture_raw: bool = False
 
 class Orchestration(BaseModel):
     """Orchestration settings."""
@@ -63,7 +64,8 @@ class Orchestration(BaseModel):
     dependency_context: DependencyContext | None = None
     worktree_source: WorktreeSource | None = None
     worktree_setup: WorktreeSetup | None = None
-    merge: MergeConfig | None = None
+    telemetry: TelemetryConfig | None = None
+    artifacts: ArtifactConfig | None = None
     stuck_threshold: int | None = None
 
 class Milestone(BaseModel):
@@ -105,4 +107,4 @@ class PlanSpec(BaseModel):
     shared_context: list[str] = Field(default_factory=list)
     orchestration: Orchestration | None = None
     agents: list[AgentSpec] = Field(default_factory=list)
-    on_complete: Literal['merge', 'none', 'notify'] = 'none'
+    on_complete: Literal['none', 'notify'] = 'none'

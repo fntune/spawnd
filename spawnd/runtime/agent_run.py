@@ -1,6 +1,7 @@
 """Runtime configuration for a single agent execution."""
 from dataclasses import dataclass
 from pathlib import Path
+from spawnd.runtime.observer import NullRuntimeObserver, RuntimeObserver
 
 @dataclass
 class AgentConfig:
@@ -17,6 +18,7 @@ class AgentConfig:
     env: dict[str, str] | None = None
     shared_context: str = ''
     runtime: str = 'claude'
+    observer: RuntimeObserver = NullRuntimeObserver()
 
     def tree_path(self) -> str:
         """Get full hierarchy path."""

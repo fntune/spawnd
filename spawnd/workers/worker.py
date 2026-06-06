@@ -1,0 +1,557 @@
+"""Deployed worker execution loop."""
+from __future__ import annotations
+
+import asyncio
+import os
+import socket
+import subprocess
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator
+
+from spawnd.artifacts.store import ArtifactStore, store_redacted_text_artifact
+from spawnd.state.submission import claim_next_agent, enqueue_newly_ready_agents
+from spawnd.coordination.redis import CoordinationPlane
+from spawnd.state.repository import ClaimedAgent, DeployedRepository
+from spawnd.observability.telemetry import TelemetryRecorder
+from spawnd.gitops.worktrees import create_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
+from spawnd.io.plan_builder import load_shared_context
+from spawnd.models.specs import AgentSpec, PlanSpec
+from spawnd.runtime.agent_config import resolve_agent_plan_config
+from spawnd.runtime.agent_run import AgentConfig
+from spawnd.runtime.executor import run_manager, run_worker, run_worker_mock
+from spawnd.runtime.observer import PostgresRuntimeObserver
+
+
+@dataclass(frozen=True)
+class WorkerRunResult:
+    """Result of one deployed worker poll."""
+
+    claimed: bool
+    run_id: str | None = None
+    agent: str | None = None
+    status: str | None = None
+
+
+class DeployedWorker:
+    """Execute claimed deployed agents."""
+
+    def __init__(
+        self,
+        *,
+        repository: DeployedRepository,
+        coordinator: CoordinationPlane,
+        artifacts: ArtifactStore,
+        telemetry: TelemetryRecorder,
+        worker_id: str,
+        source_path: Path | None = None,
+        lease_seconds: int = 300,
+        use_mock: bool = False,
+    ) -> None:
+        self.repository = repository
+        self.coordinator = coordinator
+        self.artifacts = artifacts
+        self.telemetry = telemetry
+        self.worker_id = worker_id
+        self.source_path = (source_path or Path.cwd()).resolve()
+        self.lease_seconds = lease_seconds
+        self.use_mock = use_mock
+        self.capture_raw_artifacts = False
+
+    async def run_once(self, *, block_ms: int = 1000) -> WorkerRunResult:
+        """Claim and execute at most one queued agent."""
+
+        self.heartbeat()
+        claimed_pair = claim_next_agent(
+            repository=self.repository,
+            coordinator=self.coordinator,
+            worker_id=self.worker_id,
+            lease_seconds=self.lease_seconds,
+            block_ms=block_ms,
+        )
+        if claimed_pair is None:
+            return WorkerRunResult(claimed=False)
+        _, claimed = claimed_pair
+        status = await self._execute_claimed(claimed)
+        return WorkerRunResult(claimed=True, run_id=claimed.run_id, agent=claimed.name, status=status)
+
+    async def run_poll(self, *, idle_sleep_seconds: float = 1.0, block_ms: int = 1000) -> None:
+        """Continuously claim and execute agents."""
+
+        while True:
+            result = await self.run_once(block_ms=block_ms)
+            if not result.claimed:
+                await asyncio.sleep(idle_sleep_seconds)
+
+    def heartbeat(self) -> None:
+        self.repository.record_worker_heartbeat(
+            self.worker_id,
+            hostname=socket.gethostname(),
+            capacity={'pid': os.getpid()},
+        )
+        self.coordinator.heartbeat(self.worker_id)
+
+    async def _execute_claimed(self, claimed: ClaimedAgent) -> str:
+        run = self.repository.get_run(claimed.run_id)
+        agent_row = self.repository.get_agent(claimed.run_id, claimed.name)
+        if run is None or agent_row is None:
+            return 'missing'
+        plan = PlanSpec(**run['spec'])
+        self.capture_raw_artifacts = bool(
+            plan.orchestration
+            and plan.orchestration.artifacts
+            and plan.orchestration.artifacts.capture_raw
+        )
+        agent = _find_agent(plan, claimed.name)
+        if agent is None:
+            error = f'Agent {claimed.name} is missing from run spec'
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                source='spawnd',
+                message=error,
+            )
+            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
+            return 'failed'
+        provider = _provider_for_runtime(claimed.runtime)
+        with _pushd(self.source_path):
+            worktree = self._prepare_worktree(plan, agent, claimed)
+            hydrated = resolve_agent_plan_config(agent, plan.defaults)
+            session_id = self.repository.record_runtime_session(
+                attempt_id=claimed.attempt_id,
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                provider=provider,
+                runtime=f'{claimed.runtime}_sdk' if claimed.runtime != 'codex' else 'codex',
+                model=hydrated.model,
+                cwd_locator=str(worktree),
+                metadata={'attempt': claimed.attempt_number},
+            )
+            if self.telemetry.initialization_error:
+                self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    source='otel',
+                    message=self.telemetry.initialization_error,
+                    retryable=False,
+                )
+            setup_ok = self._run_setup_if_needed(plan, agent, claimed, worktree, session_id)
+            if not setup_ok:
+                return 'failed'
+            runtime_status, runtime_result = await self._run_runtime(plan, agent, claimed, worktree, hydrated, session_id, provider)
+            if runtime_status != 'completed':
+                return runtime_status
+            check_status = self._run_check(claimed, hydrated.check_command, worktree, session_id)
+            if check_status != 'completed':
+                return check_status
+            self._record_git_provenance(claimed, worktree)
+            input_tokens = int(runtime_result.get('input_tokens') or 0)
+            output_tokens = int(runtime_result.get('output_tokens') or 0)
+            cost = float(runtime_result.get('cost') or 0.0)
+            self.repository.record_token_usage(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                provider=provider,
+                model=hydrated.model,
+                scope='result_total',
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            self.repository.record_cost_usage(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                provider=provider,
+                model=hydrated.model,
+                amount_usd=cost,
+                source=str(runtime_result.get('cost_source') or agent_row.get('cost_source') or 'unknown'),
+            )
+            ready = self.repository.complete_agent(
+                claimed.run_id,
+                claimed.name,
+                cost_usd=cost,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                attempt_id=claimed.attempt_id,
+            )
+            for name in ready:
+                self._enqueue_agent(claimed.run_id, name)
+            enqueue_newly_ready_agents(claimed.run_id, repository=self.repository, coordinator=self.coordinator)
+            return 'completed'
+
+    def _prepare_worktree(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent) -> Path:
+        source = plan.orchestration.worktree_source if plan.orchestration else None
+        with self.telemetry.span('spawnd.worktree.create', run_id=claimed.run_id, agent=claimed.name):
+            worktree = create_worktree(
+                claimed.run_id,
+                claimed.name,
+                repo_path=self.source_path,
+                base_ref=source.base_ref if source else None,
+                fetch=source.fetch if source else False,
+            )
+        if agent.depends_on:
+            dep_context = plan.orchestration.dependency_context if plan.orchestration else None
+            setup_worktree_with_deps(
+                claimed.run_id,
+                claimed.name,
+                list(agent.depends_on),
+                worktree,
+                mode=dep_context.mode if dep_context else 'full',
+                include_paths=dep_context.include_paths if dep_context else None,
+                exclude_paths=dep_context.exclude_paths if dep_context else None,
+            )
+        self.repository.update_agent_worktree(
+            claimed.run_id,
+            claimed.name,
+            worktree_locator=str(worktree),
+            branch=f'spawnd/{claimed.run_id}/{claimed.name}',
+        )
+        return worktree
+
+    def _run_setup_if_needed(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, worktree: Path, session_id: str) -> bool:
+        setup = plan.orchestration.worktree_setup if plan.orchestration else None
+        if setup is None:
+            return True
+        invocation_id = self.repository.start_runtime_invocation(
+            attempt_id=claimed.attempt_id,
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            session_id=session_id,
+            kind='setup',
+        )
+        with self.telemetry.span('spawnd.worktree.setup', run_id=claimed.run_id, agent=claimed.name, attributes={'command': setup.command}):
+            try:
+                result = run_worktree_setup(
+                    worktree,
+                    self.source_path,
+                    setup.command,
+                    env={**agent.env, **setup.env},
+                    timeout_seconds=setup.timeout_seconds,
+                )
+            except Exception as exc:
+                artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'setup-error', str(exc))
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    source='worktree_setup',
+                    message=str(exc),
+                    details_artifact_id=artifact_id,
+                )
+                self.repository.finish_runtime_invocation(invocation_id, status='failed', error_id=error_id)
+                self.repository.fail_agent(claimed.run_id, claimed.name, str(exc), attempt_id=claimed.attempt_id, error_id=error_id)
+                return False
+        artifact_id = self._store_text_artifact(
+            claimed.run_id,
+            claimed.name,
+            'setup-output',
+            f'[stdout]\n{result.stdout}\n[stderr]\n{result.stderr}',
+        )
+        self.repository.finish_runtime_invocation(invocation_id, status='completed', final_message_artifact_id=artifact_id)
+        return True
+
+    async def _run_runtime(
+        self,
+        plan: PlanSpec,
+        agent: AgentSpec,
+        claimed: ClaimedAgent,
+        worktree: Path,
+        hydrated: object,
+        session_id: str,
+        provider: str,
+    ) -> tuple[str, dict]:
+        invocation_id = self.repository.start_runtime_invocation(
+            attempt_id=claimed.attempt_id,
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            session_id=session_id,
+            kind='runtime',
+        )
+        shared_context = load_shared_context(plan.shared_context) if plan.shared_context else ''
+        observer = PostgresRuntimeObserver(
+            repository=self.repository,
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            attempt_id=claimed.attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
+            provider=provider,
+            runtime=claimed.runtime,
+        )
+        config = AgentConfig(
+            name=claimed.name,
+            run_id=claimed.run_id,
+            prompt=hydrated.prompt,
+            worktree=worktree,
+            check_command=hydrated.check_command or 'true',
+            model=hydrated.model,
+            max_iterations=hydrated.max_iterations,
+            max_cost_usd=hydrated.max_cost_usd,
+            env=agent.env or None,
+            shared_context=shared_context,
+            runtime=hydrated.runtime,
+            observer=observer,
+        )
+        try:
+            with self.telemetry.span('spawnd.runtime.invocation', run_id=claimed.run_id, agent=claimed.name, attributes={'runtime': claimed.runtime}):
+                if self.use_mock:
+                    result = await self._with_lease_renewal(claimed, run_worker_mock(config))
+                elif claimed.type == 'manager':
+                    result = await self._with_lease_renewal(claimed, run_manager(config))
+                else:
+                    result = await self._with_lease_renewal(claimed, run_worker(config))
+        except asyncio.CancelledError:
+            observer.flush()
+            error = 'Run cancelled'
+            artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-error', error)
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                source='worker_cancel',
+                message=error,
+                details_artifact_id=artifact_id,
+            )
+            self.repository.finish_runtime_invocation(invocation_id, status='cancelled', error_id=error_id)
+            self.repository.cancel_agent(claimed.run_id, claimed.name, error)
+            return ('cancelled', {'success': False, 'status': 'cancelled', 'error': error})
+        except Exception as exc:
+            observer.flush()
+            artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-error', str(exc))
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                source=f'{claimed.runtime}_runtime',
+                message=str(exc),
+                details_artifact_id=artifact_id,
+            )
+            self.repository.finish_runtime_invocation(invocation_id, status='failed', error_id=error_id)
+            self.repository.fail_agent(claimed.run_id, claimed.name, str(exc), attempt_id=claimed.attempt_id, error_id=error_id)
+            return ('failed', {'success': False, 'error': str(exc)})
+        observer.flush()
+        status = str(result.get('status') or 'failed')
+        success = bool(result.get('success')) and status == 'completed'
+        runtime_text = str(result.get('stdout') or '') + str(result.get('stderr') or '')
+        if not runtime_text:
+            runtime_text = observer.final_text or str(result.get('final_message') or result.get('final_output') or '')
+        artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-output', runtime_text)
+        final_text = str(result.get('final_message') or result.get('final_output') or observer.final_text or '')
+        final_artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'final-message', final_text) if final_text else artifact_id
+        if result.get('vendor_session_id'):
+            self.repository.append_event(
+                claimed.run_id,
+                claimed.name,
+                'vendor_session',
+                {'vendor_session_id': result.get('vendor_session_id'), 'provider': provider},
+            )
+        self.repository.finish_runtime_invocation(
+            invocation_id,
+            status='completed' if success else status,
+            final_message_artifact_id=final_artifact_id,
+        )
+        if not success:
+            error = str(result.get('error') or f'Runtime ended with status {status}')
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                source=f'{claimed.runtime}_runtime',
+                message=error,
+                details_artifact_id=artifact_id,
+            )
+            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
+            return ('failed', result)
+        if observer.input_tokens and not result.get('input_tokens'):
+            result['input_tokens'] = observer.input_tokens
+        if observer.output_tokens and not result.get('output_tokens'):
+            result['output_tokens'] = observer.output_tokens
+        if observer.cost_usd and not result.get('cost'):
+            result['cost'] = observer.cost_usd
+        if observer.cost_source != 'unknown' and not result.get('cost_source'):
+            result['cost_source'] = observer.cost_source
+        return ('completed', result)
+
+    async def _with_lease_renewal(self, claimed: ClaimedAgent, awaitable) -> dict:
+        task = asyncio.create_task(awaitable)
+        renew_task = asyncio.create_task(self._renew_lease_until_done(claimed, task))
+        try:
+            return await task
+        finally:
+            renew_task.cancel()
+            try:
+                await renew_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _renew_lease_until_done(self, claimed: ClaimedAgent, task: asyncio.Task) -> None:
+        interval = max(1.0, min(30.0, self.lease_seconds / 3))
+        while not task.done():
+            await asyncio.sleep(interval)
+            if self.coordinator.is_cancelled(claimed.run_id):
+                task.cancel()
+                return
+            postgres_ok = self.repository.renew_lease(
+                claimed.run_id,
+                claimed.name,
+                worker_id=claimed.worker_id,
+                lease_token=claimed.lease_token,
+                lease_seconds=self.lease_seconds,
+            )
+            redis_ok = self.coordinator.renew_lease(
+                claimed.run_id,
+                claimed.name,
+                claimed.lease_token,
+                self.lease_seconds,
+            )
+            if not postgres_ok or not redis_ok:
+                task.cancel()
+                return
+
+    def _run_check(self, claimed: ClaimedAgent, command: str, worktree: Path, session_id: str) -> str:
+        invocation_id = self.repository.start_runtime_invocation(
+            attempt_id=claimed.attempt_id,
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            session_id=session_id,
+            kind='check',
+        )
+        started = datetime.now(timezone.utc)
+        with self.telemetry.span('spawnd.check', run_id=claimed.run_id, agent=claimed.name, attributes={'command': command}):
+            result = subprocess.run(command or 'true', shell=True, cwd=worktree, capture_output=True, text=True)
+        duration_ms = max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+        artifact_id = self._store_text_artifact(
+            claimed.run_id,
+            claimed.name,
+            'check-output',
+            f'[stdout]\n{result.stdout}\n[stderr]\n{result.stderr}',
+        )
+        self.repository.record_check(
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            command=command or 'true',
+            exit_code=result.returncode,
+            duration_ms=duration_ms,
+            output_artifact_id=artifact_id,
+        )
+        self.repository.finish_runtime_invocation(
+            invocation_id,
+            status='completed' if result.returncode == 0 else 'failed',
+            exit_code=result.returncode,
+            final_message_artifact_id=artifact_id,
+        )
+        if result.returncode == 0:
+            return 'completed'
+        error = result.stderr.strip() or result.stdout.strip() or f'check exited {result.returncode}'
+        error_id = self.repository.record_runtime_error(
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            attempt_id=claimed.attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
+            source='check',
+            message=error,
+            details_artifact_id=artifact_id,
+        )
+        self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
+        return 'failed'
+
+    def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path) -> None:
+        with self.telemetry.span('spawnd.git.provenance', run_id=claimed.run_id, agent=claimed.name):
+            head = _git_output(['rev-parse', 'HEAD'], worktree)
+            branch = _git_output(['branch', '--show-current'], worktree)
+            shortstat = _git_output(['diff', '--shortstat', 'HEAD'], worktree, check=False)
+            numstat = _git_output(['diff', '--numstat', 'HEAD'], worktree, check=False)
+            patch = _git_output(['diff', 'HEAD'], worktree, check=False)
+        patch_artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'patch', patch) if patch else None
+        self.repository.record_git_provenance(
+            run_id=claimed.run_id,
+            agent=claimed.name,
+            head_sha=head or None,
+            branch=branch or None,
+            diff_stats={'shortstat': shortstat, 'numstat': numstat, 'patch_artifact_id': patch_artifact_id},
+        )
+
+    def _store_text_artifact(self, run_id: str, agent: str | None, kind: str, text: str) -> str:
+        with self.telemetry.span('spawnd.artifact.upload', run_id=run_id, agent=agent, attributes={'kind': kind}):
+            blob = store_redacted_text_artifact(
+                self.artifacts,
+                run_id=run_id,
+                agent=agent,
+                kind=kind,
+                text=text,
+                capture_raw=self.capture_raw_artifacts,
+            )
+        return self.repository.record_artifact(
+            run_id=run_id,
+            agent=agent,
+            kind=kind,
+            uri=blob.uri,
+            sha256=blob.sha256,
+            size_bytes=blob.size_bytes,
+            redaction_policy=blob.redaction_policy,
+            content_type=blob.content_type,
+        )
+
+    def _enqueue_agent(self, run_id: str, agent: str) -> None:
+        outbox_id = self.repository.record_queue_outbox(run_id, agent, 'agent_ready', {'run_id': run_id, 'agent': agent})
+        self.coordinator.enqueue_agent(run_id, agent)
+        self.repository.mark_outbox_published(outbox_id)
+
+
+def reconcile_ready_agents(repository: DeployedRepository, coordinator: CoordinationPlane) -> list[dict[str, str]]:
+    """Recover Redis queue hints from canonical Postgres state."""
+
+    requeued: list[dict[str, str]] = []
+    for expired in repository.expire_stale_leases():
+        coordinator.enqueue_agent(expired['run_id'], expired['agent'])
+        requeued.append({'run_id': expired['run_id'], 'agent': expired['agent']})
+    for run in repository.list_runs(limit=1000):
+        run_id = str(run['run_id'])
+        for agent in repository.ready_agents(run_id):
+            coordinator.enqueue_agent(run_id, agent)
+            requeued.append({'run_id': run_id, 'agent': agent})
+    return requeued
+
+
+def _find_agent(plan: PlanSpec, name: str) -> AgentSpec | None:
+    return next((agent for agent in plan.agents if agent.name == name), None)
+
+
+def _provider_for_runtime(runtime: str) -> str:
+    if runtime == 'claude':
+        return 'anthropic'
+    if runtime in {'codex', 'openai'}:
+        return 'openai'
+    return 'unknown'
+
+
+def _git_output(args: list[str], cwd: Path, *, check: bool = True) -> str:
+    result = run_git(args, cwd=cwd, check=check)
+    return result.stdout.strip()
+
+
+@contextmanager
+def _pushd(path: Path) -> Iterator[None]:
+    old = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)

@@ -18,15 +18,6 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from spawnd.runtime.executors.base import Executor, register
-from spawnd.storage.db import (
-    get_agent,
-    insert_event,
-    open_db,
-    update_agent_cost,
-    update_agent_iteration,
-    update_agent_status,
-)
-from spawnd.storage.paths import ensure_log_file
 
 if TYPE_CHECKING:
     from spawnd.runtime.agent_run import AgentConfig
@@ -180,40 +171,6 @@ async def _run_subprocess(
     )
 
 
-async def _run_check(config: AgentConfig, env: dict[str, str]) -> subprocess.CompletedProcess:
-    return await asyncio.to_thread(
-        subprocess.run,
-        config.check_command,
-        shell=True,
-        cwd=config.worktree,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _append_process_output(log_path: Path, result: subprocess.CompletedProcess) -> None:
-    with open(log_path, "a", encoding="utf-8") as f:
-        if result.stdout:
-            _ = f.write(result.stdout)
-            if not result.stdout.endswith("\n"):
-                _ = f.write("\n")
-        if result.stderr:
-            _ = f.write(result.stderr)
-            if not result.stderr.endswith("\n"):
-                _ = f.write("\n")
-
-
-def _append_check_output(log_path: Path, check: subprocess.CompletedProcess) -> None:
-    if not check.stdout and not check.stderr:
-        return
-    with open(log_path, "a", encoding="utf-8") as f:
-        _ = f.write("\n[check stdout]\n")
-        _ = f.write(check.stdout)
-        _ = f.write("\n[check stderr]\n")
-        _ = f.write(check.stderr)
-
-
 def _usage_tokens(usage: Any) -> tuple[int, int]:
     if usage is None:
         return 0, 0
@@ -235,18 +192,14 @@ class CodexExecutor(Executor):
     runtime = "codex"
 
     async def run(self, config: AgentConfig, toolset: Toolset) -> dict:
-        db = open_db(config.run_id)
         is_manager = "mark_plan_complete" in toolset.coord
-        log_path = ensure_log_file(config.run_id, config.name)
 
         try:
-            update_agent_status(db, config.run_id, config.name, "running")
-            _ = insert_event(db, config.run_id, config.name, "started", {"prompt": config.prompt[:200]})
+            config.observer.event("started", {"runtime": "codex"})
 
             if is_manager:
                 error = "codex runtime currently supports worker agents only"
-                update_agent_status(db, config.run_id, config.name, "failed", error)
-                _ = insert_event(db, config.run_id, config.name, "error", {"error": error})
+                config.observer.error("codex", error)
                 return {"success": False, "status": "failed", "cost": 0.0, "error": error}
 
             env = _build_agent_env(config)
@@ -255,8 +208,7 @@ class CodexExecutor(Executor):
 
             if engine == CODEX_ENGINE_SDK and sdk_module is None:
                 error = _sdk_required_error()
-                update_agent_status(db, config.run_id, config.name, "failed", error)
-                _ = insert_event(db, config.run_id, config.name, "error", {"error": error})
+                config.observer.error("codex_sdk", error)
                 return {"success": False, "status": "failed", "cost": 0.0, "error": error}
 
             use_sdk = engine == CODEX_ENGINE_SDK or (
@@ -264,61 +216,54 @@ class CodexExecutor(Executor):
             )
             if use_sdk:
                 assert sdk_module is not None
-                result = await self._run_sdk(config, env, log_path, sdk_module)
+                result = await self._run_sdk(config, env, sdk_module)
             else:
-                result = await self._run_cli(config, env, log_path)
-
-            update_agent_iteration(db, config.run_id, config.name, 1)
+                result = await self._run_cli(config, env)
 
             status = result.get("status", "failed")
             if status != "completed":
                 error = result.get("error", "Codex run failed")
-                update_agent_status(db, config.run_id, config.name, "failed", error[:1000])
-                _ = insert_event(db, config.run_id, config.name, "error", {"error": error[:1000]})
-                return {"success": False, "status": "failed", "cost": 0.0, "error": error[:1000]}
+                config.observer.error("codex", error[:1000])
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "cost": 0.0,
+                    "error": error[:1000],
+                    "input_tokens": result.get("input_tokens", 0),
+                    "output_tokens": result.get("output_tokens", 0),
+                    "final_message": result.get("final_message", ""),
+                    "cost_source": "codex",
+                }
 
-            check = await _run_check(config, env)
-            _append_check_output(log_path, check)
-            if check.returncode != 0:
-                error = check.stderr.strip() or check.stdout.strip() or f"check exited {check.returncode}"
-                update_agent_status(db, config.run_id, config.name, "failed", error[:1000])
-                _ = insert_event(db, config.run_id, config.name, "error", {"error": error[:1000]})
-                return {"success": False, "status": "failed", "cost": 0.0, "error": error[:1000]}
-
-            update_agent_cost(db, config.run_id, config.name, 0.0)
-            update_agent_status(db, config.run_id, config.name, "completed")
-            _ = insert_event(
-                db,
-                config.run_id,
-                config.name,
-                "done",
-                {
-                    "summary": result.get("final_message", "")[:1000]
-                    or "Codex completed and check passed"
-                },
+            final_message = result.get("final_message", "")
+            config.observer.final(final_message)
+            config.observer.usage(
+                input_tokens=result.get("input_tokens", 0),
+                output_tokens=result.get("output_tokens", 0),
+                cost_usd=0.0,
+                source="codex",
+                raw={"thread_id": result.get("thread_id")},
             )
-            agent = get_agent(db, config.run_id, config.name)
             return {
                 "success": True,
-                "status": agent["status"] if agent else "completed",
+                "status": "completed",
                 "cost": 0.0,
                 "vendor_session_id": result.get("thread_id"),
+                "input_tokens": result.get("input_tokens", 0),
+                "output_tokens": result.get("output_tokens", 0),
+                "final_message": result.get("final_message", ""),
+                "cost_source": "codex",
             }
 
         except Exception as e:
             logger.error(f"Codex worker {config.name} failed: {e}")
-            update_agent_status(db, config.run_id, config.name, "failed", str(e))
-            _ = insert_event(db, config.run_id, config.name, "error", {"error": str(e)})
+            config.observer.error("codex", str(e))
             return {"success": False, "status": "failed", "cost": 0.0, "error": str(e)}
-
-        finally:
-            db.close()
 
     async def _run_sdk(
         self,
         config: AgentConfig,
         env: dict[str, str],
-        log_path: Path,
         sdk_module: ModuleType,
     ) -> _CodexRunResult:
         logger.info(f"Starting worker {config.name} via Codex SDK in {config.worktree}")
@@ -348,15 +293,16 @@ class CodexExecutor(Executor):
 
         final_message = turn_result.final_response or ""
         input_tokens, output_tokens = _usage_tokens(turn_result.usage)
-        with open(log_path, "a", encoding="utf-8") as f:
-            _ = f.write(f"[codex sdk]\nthread: {thread.id}\nturn: {turn_result.id}\n")
-            _ = f.write(f"status: {_status_value(turn_result.status)}\n")
-            _ = f.write(f"input_tokens: {input_tokens}\noutput_tokens: {output_tokens}\n")
-            if final_message:
-                _ = f.write("\n[final message]\n")
-                _ = f.write(final_message)
-                if not final_message.endswith("\n"):
-                    _ = f.write("\n")
+        config.observer.invocation(
+            "codex_sdk_turn",
+            {
+                "thread_id": thread.id,
+                "turn_id": turn_result.id,
+                "status": _status_value(turn_result.status),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        )
 
         return {
             "status": _status_value(turn_result.status),
@@ -370,13 +316,22 @@ class CodexExecutor(Executor):
         self,
         config: AgentConfig,
         env: dict[str, str],
-        log_path: Path,
     ) -> _CodexRunResult:
         logger.info(f"Starting worker {config.name} via Codex CLI in {config.worktree}")
-        last_message_path = log_path.with_suffix(".last-message.txt")
+        scratch_dir = config.worktree / ".spawnd-scratch" / config.run_id / config.name
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        last_message_path = scratch_dir / "last-message.txt"
         cmd = _build_codex_command(config, env, last_message_path)
         process = await _run_subprocess(cmd, cwd=config.worktree, env=env)
-        _append_process_output(log_path, process)
+        config.observer.invocation(
+            "codex_cli_subprocess",
+            {
+                "argv_preview": " ".join(shlex.quote(part) for part in cmd[:6]),
+                "returncode": process.returncode,
+                "stdout_bytes": len(process.stdout.encode("utf-8")),
+                "stderr_bytes": len(process.stderr.encode("utf-8")),
+            },
+        )
 
         if process.returncode != 0:
             error = (
@@ -389,12 +344,6 @@ class CodexExecutor(Executor):
         final_message = ""
         if last_message_path.exists():
             final_message = last_message_path.read_text(encoding="utf-8")
-            if final_message:
-                with open(log_path, "a", encoding="utf-8") as f:
-                    _ = f.write("\n[final message]\n")
-                    _ = f.write(final_message)
-                    if not final_message.endswith("\n"):
-                        _ = f.write("\n")
 
         return {"status": "completed", "final_message": final_message}
 

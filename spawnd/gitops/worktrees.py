@@ -3,7 +3,6 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from spawnd.storage.paths import get_worktrees_dir
 logger = logging.getLogger('spawnd.git')
 
 class GitError(Exception):
@@ -13,6 +12,14 @@ class GitError(Exception):
 class WorktreeSetupError(GitError):
     """Worktree setup command failed."""
     pass
+
+
+def get_worktrees_dir(run_id: str, repo_path: Path | None = None) -> Path:
+    """Worker-local scratch directory for run worktrees."""
+
+    repo = repo_path or Path.cwd()
+    root = Path(os.environ.get('SPAWND_SCRATCH_ROOT', str(repo / '.spawnd-scratch')))
+    return root / 'worktrees' / run_id
 
 def run_git(args: list[str], cwd: Path | None=None, check: bool=True) -> subprocess.CompletedProcess:
     """Run a git command."""
@@ -152,28 +159,6 @@ def merge_branch(worktree_path: Path, branch: str, message: str | None=None) -> 
     _ = logger.info(f'Merged {branch} into {worktree_path}')
     return True
 
-def merge_branch_to_current(branch: str, message: str | None=None, repo_path: Path | None=None) -> bool:
-    """Merge a branch into the current branch.
-
-    Args:
-        branch: Branch name to merge
-        message: Optional commit message
-        repo_path: Repository path (defaults to cwd)
-
-    Returns:
-        True if merge succeeded, False if there were conflicts
-    """
-    repo = repo_path or Path.cwd()
-    msg = message or f'Merge {branch}'
-    result = run_git(['merge', branch, '--no-edit', '-m', msg], cwd=repo, check=False)
-    if result.returncode != 0:
-        if 'CONFLICT' in result.stdout or 'CONFLICT' in result.stderr:
-            _ = logger.warning(f'Merge conflict merging {branch}')
-            return False
-        raise GitError(f'Merge failed: {result.stderr}')
-    _ = logger.info(f'Merged {branch}')
-    return True
-
 def get_changed_files(branch: str, base: str, repo_path: Path | None=None) -> list[str]:
     """Get files changed between base and branch."""
     return [path for change in get_changed_file_changes(branch, base, repo_path) if (path := change['path'])]
@@ -204,10 +189,6 @@ def has_conflicts(worktree_path: Path) -> bool:
     """Check if worktree has unresolved conflicts."""
     result = run_git(['diff', '--name-only', '--diff-filter=U'], cwd=worktree_path, check=False)
     return bool(result.stdout.strip())
-
-def abort_merge(worktree_path: Path) -> None:
-    """Abort an in-progress merge."""
-    _ = run_git(['merge', '--abort'], cwd=worktree_path)
 
 def commit(worktree_path: Path, message: str) -> None:
     """Create a commit in a worktree."""
