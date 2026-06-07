@@ -14,18 +14,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("spawnd.executors.claude")
 
 
-def _build_agent_env(config: AgentConfig) -> dict[str, str]:
-    env = {
-        "SPAWND_RUN_ID": config.run_id,
-        "SPAWND_AGENT_NAME": config.name,
-        "SPAWND_PARENT_AGENT": config.parent or "",
-        "SPAWND_TREE_PATH": config.tree_path(),
-    }
-    if config.env:
-        env.update(config.env)
-    return env
-
-
 class ClaudeExecutor(Executor):
     """Drive a Claude agent and report provider facts through the observer."""
 
@@ -64,7 +52,7 @@ class ClaudeExecutor(Executor):
             allowed_tools = list(toolset.code) + [f"mcp__spawnd__{op}" for op in toolset.coord]
             options = ClaudeAgentOptions(
                 cwd=str(config.worktree),
-                env=_build_agent_env(config),
+                env=config.execution_env(),
                 mcp_servers={"spawnd": server},
                 allowed_tools=allowed_tools,
                 model=config.model,

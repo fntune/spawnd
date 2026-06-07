@@ -1,4 +1,5 @@
 """Runtime configuration for a single agent execution."""
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from spawnd.runtime.observer import NullRuntimeObserver, RuntimeObserver
@@ -25,3 +26,19 @@ class AgentConfig:
         if self.parent and (not self.name.startswith(f'{self.parent}.')):
             return f'{self.parent}.{self.name}'
         return self.name
+
+    def execution_env(self, base: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Build the environment passed to provider runtimes and their tools."""
+
+        env = dict(base or {})
+        if self.env:
+            env.update(self.env)
+        env.update(
+            {
+                'SPAWND_RUN_ID': self.run_id,
+                'SPAWND_AGENT_NAME': self.name,
+                'SPAWND_PARENT_AGENT': self.parent or '',
+                'SPAWND_TREE_PATH': self.tree_path(),
+            }
+        )
+        return env
