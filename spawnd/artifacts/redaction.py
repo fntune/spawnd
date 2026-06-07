@@ -11,8 +11,8 @@ SENSITIVE_KEY = re.compile(
     r'(token|secret|password|passwd|pwd|credential|auth|api[_-]?key|private[_-]?key|database_url|redis_url)',
     re.IGNORECASE,
 )
-ASSIGNMENT_SECRET = re.compile(
-    r'(?P<key>[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL|AUTH|API_KEY|PRIVATE_KEY)[A-Z0-9_]*)\s*=\s*(?P<value>[^\s]+)',
+ASSIGNMENT = re.compile(
+    r"(?P<key>[A-Z0-9_]+)\s*=\s*(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s]+)",
     re.IGNORECASE,
 )
 
@@ -34,7 +34,12 @@ def text_metadata(value: str) -> dict[str, Any]:
 def redact_freeform_text(value: str, *, limit: int = 20000) -> str:
     """Redact obvious secret assignments while preserving useful output context."""
 
-    redacted = ASSIGNMENT_SECRET.sub(lambda match: f"{match.group('key')}=<redacted>", value)
+    redacted = ASSIGNMENT.sub(
+        lambda match: f"{match.group('key')}=<redacted>"
+        if SENSITIVE_KEY.search(match.group('key'))
+        else match.group(0),
+        value,
+    )
     if len(redacted) <= limit:
         return redacted
     return redacted[:limit] + f'\n[truncated {len(redacted) - limit} chars]'

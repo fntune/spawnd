@@ -17,7 +17,7 @@ from spawnd.state.submission import claim_next_agent, enqueue_newly_ready_agents
 from spawnd.coordination.redis import CoordinationPlane
 from spawnd.state.repository import ClaimedAgent, DeployedRepository
 from spawnd.observability.telemetry import TelemetryRecorder
-from spawnd.gitops.worktrees import create_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
+from spawnd.gitops.worktrees import GitError, create_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
 from spawnd.io.plan_builder import load_shared_context
 from spawnd.models.specs import AgentSpec, PlanSpec
 from spawnd.runtime.agent_config import resolve_agent_plan_config
@@ -34,6 +34,15 @@ class WorkerRunResult:
     run_id: str | None = None
     agent: str | None = None
     status: str | None = None
+
+
+@dataclass(frozen=True)
+class RunSource:
+    """Resolved local source repository used to create a worker scratch worktree."""
+
+    repo_path: Path
+    base_ref: str | None
+    fetch: bool
 
 
 class DeployedWorker:
@@ -118,8 +127,55 @@ class DeployedWorker:
             self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
             return 'failed'
         provider = _provider_for_runtime(claimed.runtime)
-        with _pushd(self.source_path):
-            worktree = self._prepare_worktree(plan, agent, claimed)
+        try:
+            source = self._resolve_run_source(run, plan)
+            self.repository.append_event(
+                claimed.run_id,
+                claimed.name,
+                'worktree_source_resolved',
+                {'source_repo': str(source.repo_path), 'base_ref': source.base_ref, 'fetch': source.fetch},
+            )
+        except Exception as exc:
+            error = str(exc)
+            artifact_id = self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'source-error',
+                error,
+                attempt_id=claimed.attempt_id,
+            )
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                source='worktree_source',
+                message=error,
+                details_artifact_id=artifact_id,
+            )
+            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
+            return 'failed'
+        with _pushd(source.repo_path):
+            try:
+                worktree = self._prepare_worktree(plan, agent, claimed, source)
+            except Exception as exc:
+                error = str(exc)
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'worktree-error',
+                    error,
+                    attempt_id=claimed.attempt_id,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    source='worktree_create',
+                    message=error,
+                    details_artifact_id=artifact_id,
+                )
+                self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
+                return 'failed'
             hydrated = resolve_agent_plan_config(agent, plan.defaults)
             session_id = self.repository.record_runtime_session(
                 attempt_id=claimed.attempt_id,
@@ -141,7 +197,7 @@ class DeployedWorker:
                     message=self.telemetry.initialization_error,
                     retryable=False,
                 )
-            setup_ok = self._run_setup_if_needed(plan, agent, claimed, worktree, session_id)
+            setup_ok = self._run_setup_if_needed(plan, agent, claimed, worktree, session_id, source.repo_path)
             if not setup_ok:
                 return 'failed'
             runtime_status, runtime_result = await self._run_runtime(plan, agent, claimed, worktree, hydrated, session_id, provider)
@@ -150,7 +206,7 @@ class DeployedWorker:
             check_status = self._run_check(claimed, hydrated.check_command, worktree, session_id)
             if check_status != 'completed':
                 return check_status
-            self._record_git_provenance(claimed, worktree, run, plan)
+            self._record_git_provenance(claimed, worktree, source)
             input_tokens = int(runtime_result.get('input_tokens') or 0)
             output_tokens = int(runtime_result.get('output_tokens') or 0)
             cost = float(runtime_result.get('cost') or 0.0)
@@ -188,15 +244,35 @@ class DeployedWorker:
             enqueue_newly_ready_agents(claimed.run_id, repository=self.repository, coordinator=self.coordinator)
             return 'completed'
 
-    def _prepare_worktree(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent) -> Path:
-        source = plan.orchestration.worktree_source if plan.orchestration else None
+    def _resolve_run_source(self, run: dict, plan: PlanSpec) -> RunSource:
+        """Resolve the submitted run source into a local git repository root."""
+
+        configured = plan.orchestration.worktree_source if plan.orchestration else None
+        source_repo = run.get('source_repo') or str(self.source_path)
+        candidate = Path(str(source_repo)).expanduser()
+        if not candidate.exists():
+            raise GitError(f'Run source repository does not exist: {candidate}')
+        result = run_git(['rev-parse', '--show-toplevel'], cwd=candidate, check=False)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or 'not a git repository'
+            raise GitError(f'Run source repository is not a git repository: {candidate}: {detail}')
+        repo_path = Path(result.stdout.strip()).resolve()
+        configured_base = configured.base_ref if configured and configured.base_ref else None
+        base_ref = configured_base or run.get('source_ref')
+        return RunSource(
+            repo_path=repo_path,
+            base_ref=str(base_ref) if base_ref else None,
+            fetch=configured.fetch if configured else False,
+        )
+
+    def _prepare_worktree(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, source: RunSource) -> Path:
         with self.telemetry.span('spawnd.worktree.create', run_id=claimed.run_id, agent=claimed.name):
             worktree = create_worktree(
                 claimed.run_id,
                 claimed.name,
-                repo_path=self.source_path,
-                base_ref=source.base_ref if source else None,
-                fetch=source.fetch if source else False,
+                repo_path=source.repo_path,
+                base_ref=source.base_ref,
+                fetch=source.fetch,
             )
         if agent.depends_on:
             dep_context = plan.orchestration.dependency_context if plan.orchestration else None
@@ -217,7 +293,7 @@ class DeployedWorker:
         )
         return worktree
 
-    def _run_setup_if_needed(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, worktree: Path, session_id: str) -> bool:
+    def _run_setup_if_needed(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, worktree: Path, session_id: str, source_path: Path) -> bool:
         setup = plan.orchestration.worktree_setup if plan.orchestration else None
         if setup is None:
             return True
@@ -232,13 +308,21 @@ class DeployedWorker:
             try:
                 result = run_worktree_setup(
                     worktree,
-                    self.source_path,
+                    source_path,
                     setup.command,
                     env={**agent.env, **setup.env},
                     timeout_seconds=setup.timeout_seconds,
                 )
             except Exception as exc:
-                artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'setup-error', str(exc))
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'setup-error',
+                    str(exc),
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                )
                 error_id = self.repository.record_runtime_error(
                     run_id=claimed.run_id,
                     agent=claimed.name,
@@ -257,6 +341,9 @@ class DeployedWorker:
             claimed.name,
             'setup-output',
             f'[stdout]\n{result.stdout}\n[stderr]\n{result.stderr}',
+            attempt_id=claimed.attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
         )
         self.repository.finish_runtime_invocation(invocation_id, status='completed', final_message_artifact_id=artifact_id)
         return True
@@ -314,7 +401,15 @@ class DeployedWorker:
         except asyncio.CancelledError:
             observer.flush()
             error = 'Run cancelled'
-            artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-error', error)
+            artifact_id = self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'runtime-error',
+                error,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+            )
             error_id = self.repository.record_runtime_error(
                 run_id=claimed.run_id,
                 agent=claimed.name,
@@ -330,7 +425,15 @@ class DeployedWorker:
             return ('cancelled', {'success': False, 'status': 'cancelled', 'error': error})
         except Exception as exc:
             observer.flush()
-            artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-error', str(exc))
+            artifact_id = self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'runtime-error',
+                str(exc),
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+            )
             error_id = self.repository.record_runtime_error(
                 run_id=claimed.run_id,
                 agent=claimed.name,
@@ -350,9 +453,29 @@ class DeployedWorker:
         runtime_text = str(result.get('stdout') or '') + str(result.get('stderr') or '')
         if not runtime_text:
             runtime_text = observer.final_text or str(result.get('final_message') or result.get('final_output') or '')
-        artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'runtime-output', runtime_text)
+        artifact_id = self._store_text_artifact(
+            claimed.run_id,
+            claimed.name,
+            'runtime-output',
+            runtime_text,
+            attempt_id=claimed.attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
+        )
         final_text = str(result.get('final_message') or result.get('final_output') or observer.final_text or '')
-        final_artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'final-message', final_text) if final_text else artifact_id
+        final_artifact_id = (
+            self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'final-message',
+                final_text,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+            )
+            if final_text
+            else artifact_id
+        )
         if result.get('vendor_session_id'):
             self.repository.append_event(
                 claimed.run_id,
@@ -436,12 +559,16 @@ class DeployedWorker:
         started = datetime.now(timezone.utc)
         with self.telemetry.span('spawnd.check', run_id=claimed.run_id, agent=claimed.name, attributes={'command': command}):
             result = subprocess.run(command or 'true', shell=True, cwd=worktree, capture_output=True, text=True)
-        duration_ms = max(0, int((datetime.now(timezone.utc) - started).total_seconds() * 1000))
+        completed = datetime.now(timezone.utc)
+        duration_ms = max(0, int((completed - started).total_seconds() * 1000))
         artifact_id = self._store_text_artifact(
             claimed.run_id,
             claimed.name,
             'check-output',
             f'[stdout]\n{result.stdout}\n[stderr]\n{result.stderr}',
+            attempt_id=claimed.attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
         )
         self.repository.record_check(
             run_id=claimed.run_id,
@@ -450,6 +577,12 @@ class DeployedWorker:
             exit_code=result.returncode,
             duration_ms=duration_ms,
             output_artifact_id=artifact_id,
+            attempt_id=claimed.attempt_id,
+            runtime_invocation_id=invocation_id,
+            shell='/bin/sh',
+            cwd_locator=str(worktree),
+            started_at=started,
+            completed_at=completed,
         )
         self.repository.finish_runtime_invocation(
             invocation_id,
@@ -473,9 +606,8 @@ class DeployedWorker:
         self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
         return 'failed'
 
-    def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path, run: dict, plan: PlanSpec) -> None:
-        source = plan.orchestration.worktree_source if plan.orchestration else None
-        base_ref = (source.base_ref if source and source.base_ref else None) or run.get('source_ref')
+    def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path, source: RunSource) -> None:
+        base_ref = source.base_ref
         with self.telemetry.span('spawnd.git.provenance', run_id=claimed.run_id, agent=claimed.name):
             head = _git_output(['rev-parse', 'HEAD'], worktree)
             branch = _git_output(['branch', '--show-current'], worktree)
@@ -499,7 +631,17 @@ class DeployedWorker:
             pr_url, pr_number = _pull_request_for_branch(branch, worktree) if branch else (None, None)
         patch_parts = [part for part in [committed_patch, worktree_patch] if part]
         patch = '\n'.join(patch_parts)
-        patch_artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'patch', patch) if patch else None
+        patch_artifact_id = (
+            self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'patch',
+                patch,
+                attempt_id=claimed.attempt_id,
+            )
+            if patch
+            else None
+        )
         changed_files_count, insertions_count, deletions_count = _numstat_summary(committed_numstat, worktree_numstat)
         self.repository.record_git_provenance(
             run_id=claimed.run_id,
@@ -522,6 +664,7 @@ class DeployedWorker:
             deletions_count=deletions_count,
             diff_stats={
                 'base_ref': base_ref,
+                'source_repo': str(source.repo_path),
                 'range': committed_range,
                 'committed_shortstat': committed_shortstat,
                 'committed_numstat': committed_numstat,
@@ -531,7 +674,17 @@ class DeployedWorker:
             },
         )
 
-    def _store_text_artifact(self, run_id: str, agent: str | None, kind: str, text: str) -> str:
+    def _store_text_artifact(
+        self,
+        run_id: str,
+        agent: str | None,
+        kind: str,
+        text: str,
+        *,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
+    ) -> str:
         with self.telemetry.span('spawnd.artifact.upload', run_id=run_id, agent=agent, attributes={'kind': kind}):
             blob = store_redacted_text_artifact(
                 self.artifacts,
@@ -550,27 +703,39 @@ class DeployedWorker:
             size_bytes=blob.size_bytes,
             redaction_policy=blob.redaction_policy,
             content_type=blob.content_type,
+            attempt_id=attempt_id,
+            session_id=session_id,
+            invocation_id=invocation_id,
         )
 
     def _enqueue_agent(self, run_id: str, agent: str) -> None:
-        outbox_id = self.repository.record_queue_outbox(run_id, agent, 'agent_ready', {'run_id': run_id, 'agent': agent})
-        self.coordinator.enqueue_agent(run_id, agent)
-        self.repository.mark_outbox_published(outbox_id)
+        _publish_ready_agent(self.repository, self.coordinator, run_id, agent)
 
 
 def reconcile_ready_agents(repository: DeployedRepository, coordinator: CoordinationPlane) -> list[dict[str, str]]:
     """Recover Redis queue hints from canonical Postgres state."""
 
     requeued: list[dict[str, str]] = []
+    published: set[tuple[str, str]] = set()
     for expired in repository.expire_stale_leases():
-        coordinator.enqueue_agent(expired['run_id'], expired['agent'])
+        _publish_ready_agent(repository, coordinator, expired['run_id'], expired['agent'])
         requeued.append({'run_id': expired['run_id'], 'agent': expired['agent']})
+        published.add((expired['run_id'], expired['agent']))
     for run in repository.list_runs(limit=1000):
         run_id = str(run['run_id'])
         for agent in repository.ready_agents(run_id):
-            coordinator.enqueue_agent(run_id, agent)
+            if (run_id, agent) in published:
+                continue
+            _publish_ready_agent(repository, coordinator, run_id, agent)
             requeued.append({'run_id': run_id, 'agent': agent})
+            published.add((run_id, agent))
     return requeued
+
+
+def _publish_ready_agent(repository: DeployedRepository, coordinator: CoordinationPlane, run_id: str, agent: str) -> None:
+    outbox_id = repository.record_queue_outbox(run_id, agent, 'agent_ready', {'run_id': run_id, 'agent': agent})
+    coordinator.enqueue_agent(run_id, agent)
+    repository.mark_outbox_published(outbox_id)
 
 
 def _find_agent(plan: PlanSpec, name: str) -> AgentSpec | None:

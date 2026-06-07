@@ -17,18 +17,6 @@ logger = logging.getLogger("spawnd.executors.openai")
 DEFAULT_OPENAI_MODEL = "gpt-5"
 
 
-def _build_agent_env(config: AgentConfig) -> dict[str, str]:
-    env = {
-        "SPAWND_RUN_ID": config.run_id,
-        "SPAWND_AGENT_NAME": config.name,
-        "SPAWND_PARENT_AGENT": config.parent or "",
-        "SPAWND_TREE_PATH": config.tree_path(),
-    }
-    if config.env:
-        env.update(config.env)
-    return env
-
-
 class OpenAIExecutor(Executor):
     """Drive an agent via the OpenAI Agents SDK."""
 
@@ -56,7 +44,7 @@ class OpenAIExecutor(Executor):
                     tree_path=config.tree_path(),
                 )
             )
-            code_tools = build_code_tools(config.worktree, write_allowed=toolset.write_allowed, env=_build_agent_env(config))
+            code_tools = build_code_tools(config.worktree, write_allowed=toolset.write_allowed, env=config.execution_env())
             model = config.model if config.model and config.model != "sonnet" else DEFAULT_OPENAI_MODEL
             agent = Agent(name=config.name, instructions=toolset.system_prompt, tools=coord_tools + code_tools, model=model)
             starter = (

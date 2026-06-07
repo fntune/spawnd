@@ -1,17 +1,16 @@
 """HTTP API for deployed spawnd."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from spawnd.api import cancel as cancel_run
 from spawnd.api import resume as resume_run
 from spawnd.config import load_backend_config
 from spawnd.coordination.redis import RedisCoordinator
-from spawnd.io.parser import parse_plan_file
+from spawnd.io.validation import validate_plan
 from spawnd.models.specs import PlanSpec
 from spawnd.state.repository import DeployedRepository
 from spawnd.state.submission import submit_plan
@@ -19,8 +18,9 @@ from spawnd.workers.worker import reconcile_ready_agents
 
 
 class SubmitBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     plan: PlanSpec | None = None
-    plan_file: str | None = None
     run_id: str | None = None
     source_repo: str | None = None
     source_ref: str | None = None
@@ -58,10 +58,11 @@ def create_app() -> FastAPI:
     @app.post("/runs")
     def submit(body: SubmitBody) -> dict[str, str]:
         plan = body.plan
-        if plan is None and body.plan_file:
-            plan = parse_plan_file(Path(body.plan_file))
         if plan is None:
-            raise HTTPException(status_code=422, detail="plan or plan_file is required")
+            raise HTTPException(status_code=422, detail="plan is required")
+        errors = validate_plan(plan)
+        if errors:
+            raise HTTPException(status_code=422, detail=errors)
         run_id = submit_plan(
             plan,
             repository=_repository(),
