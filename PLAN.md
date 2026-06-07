@@ -13,6 +13,8 @@ Spawnd runs as a deployed orchestration system:
   direct database rows.
 - Worktrees and worker files are execution scratch.
 - CLI, Python API, and HTTP API are clients of the same backend.
+- `source_repo` is a worker-local git repository path. Workers validate it and
+  create scratch worktrees from it; they do not clone remote repositories yet.
 
 ## Execution Flow
 
@@ -20,13 +22,16 @@ Spawnd runs as a deployed orchestration system:
 2. Ready agents are inserted in Postgres and published through outbox plus
    Redis queue hints.
 3. Workers read hints, claim agents transactionally, and write attempts.
-4. Workers create scratch worktrees from the source repo/ref.
-5. Setup runs in the worktree and redacted output becomes an artifact.
-6. Provider runtimes emit facts through `RuntimeObserver`.
-7. Workers run verification checks uniformly.
-8. Workers store redacted runtime output, final messages, checks, patches,
+4. Workers resolve `runs.source_repo` or the fallback `--source-path`, validate
+   that it is an existing git repository, and choose the worktree base from
+   `orchestration.worktree_source.base_ref` or `runs.source_ref`.
+5. Workers create scratch worktrees from the resolved source repo/ref.
+6. Setup runs in the worktree and redacted output becomes an artifact.
+7. Provider runtimes emit facts through `RuntimeObserver`.
+8. Workers run verification checks uniformly.
+9. Workers store redacted runtime output, final messages, checks, patches,
    usage, traces, and git provenance.
-9. Completion unblocks dependent agents; reconciliation can rebuild Redis hints
+10. Completion unblocks dependent agents; reconciliation can rebuild Redis hints
    from Postgres at any time.
 
 ## Public Interfaces
@@ -37,6 +42,9 @@ Spawnd runs as a deployed orchestration system:
 - Reads: `status`, `events`, `live-events`, `artifacts`, `logs`, `checks`,
   `trace`, `provenance`.
 - Control: `cancel`, `resume`, `pr create`.
+
+`POST /runs` accepts an inline serialized plan and rejects server-local
+`plan_file` reads. CLI file parsing stays at the CLI boundary.
 
 ## Schema
 
@@ -65,3 +73,13 @@ The initial Alembic migration creates the complete deployed schema from
   object store.
 - Removal audit for deleted durability terms, deleted log helpers, and removed
   internal import paths.
+- Docs-only changes should at least pass `git diff --check`.
+
+## Known Operational Gaps
+
+- Remote clone/fetch with scoped git credentials is not implemented.
+- Agent branches and patch artifacts are recorded, but completed work is not
+  pushed automatically.
+- Runtime wall-clock deadlines, retryable provider error classification,
+  deployment manifests, API auth, and worktree cleanup remain open unattended
+  operation work.

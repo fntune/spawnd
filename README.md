@@ -67,7 +67,7 @@ queue outbox.
 Submit a plan file:
 
 ```bash
-spawnd run -f plan.yaml --source-repo "$PWD"
+spawnd run -f plan.yaml --source-repo "$PWD" --source-ref origin/main
 ```
 
 `spawnd submit -f plan.yaml` is an alias for the same deployed submit path.
@@ -88,21 +88,40 @@ run(
     repository=repo,
     coordinator=coordinator,
     source_repo="/repo",
+    source_ref="origin/main",
 )
 ```
+
+`source_repo` is a local git repository path that workers can read. The CLI
+defaults it to the submitter's current directory when omitted. `source_ref` is
+the default base ref for worker-created worktrees; a plan-level
+`orchestration.worktree_source.base_ref` intentionally overrides it.
+
+```yaml
+orchestration:
+  worktree_source:
+    base_ref: origin/main
+    fetch: true
+  worktree_setup:
+    command: bash scripts/worktree/setup.sh
+```
+
+Spawnd does not clone remote repositories yet. For unattended runs, every worker
+host must already have access to the submitted local `source_repo` path and any
+refs used by `source_ref` or `worktree_source.base_ref`.
 
 ## Workers
 
 Run a single claim:
 
 ```bash
-spawnd worker --once --source-path /repo
+spawnd worker --once
 ```
 
 Run a polling worker:
 
 ```bash
-spawnd worker --poll --source-path /repo
+spawnd worker --poll
 ```
 
 Recover queue hints from Postgres:
@@ -117,9 +136,20 @@ Record a heartbeat:
 spawnd worker-heartbeat
 ```
 
-Workers claim through a Postgres transaction, renew lease state while running,
-write artifacts and provenance, and enqueue newly ready dependents through the
-queue outbox plus Redis wakeups.
+Workers can serve runs for any submitted local `source_repo` they can read.
+`--source-path /repo` is optional and is only the fallback source when a run has
+no `source_repo`.
+
+Workers claim through a Postgres transaction, move the run to `running`, renew
+lease state while executing, write artifacts and provenance, and enqueue newly
+ready dependents through the queue outbox plus Redis wakeups. Redis entries are
+wakeups only: reconciliation rebuilds missing hints from Postgres and records
+outbox rows before publishing.
+
+If the submitted source path is missing or is not a git repository, the worker
+fails the claimed agent with a redacted source-error artifact and a
+`runtime_errors(source='worktree_source')` row instead of leaving the agent
+running.
 
 ## Inspect Runs
 
@@ -166,6 +196,26 @@ Endpoints:
 - `POST /runs/{run_id}/resume`
 - `POST /workers/reconcile`
 
+`POST /runs` accepts a serialized plan body. It does not read server-local plan
+files.
+
+```json
+{
+  "run_id": "optional-run-id",
+  "plan": {
+    "name": "example",
+    "agents": [
+      {"name": "parser", "prompt": "Improve parser diagnostics"}
+    ]
+  },
+  "source_repo": "/repo",
+  "source_ref": "origin/main"
+}
+```
+
+The server validates the plan at the HTTP boundary and rejects unknown request
+fields.
+
 ## Development
 
 Install with deployed extras:
@@ -183,3 +233,10 @@ pytest
 
 Without `SPAWND_TEST_DATABASE_URL`, Postgres integration tests are skipped and
 unit tests still run.
+
+Useful local verification commands:
+
+```bash
+python -m compileall -q spawnd tests
+git diff --check
+```

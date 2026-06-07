@@ -1,8 +1,12 @@
 # Deployed Observability Schema Plan
 
 This document maps the Codex and Claude runtime facts spawnd can collect into a
-normalized Postgres schema for deployed runs. It is a target plan for the next
-schema migration after the current deployed backend foundation.
+normalized Postgres schema for deployed runs. The greenfield deployed schema now
+includes the durable tables for runs, agents, attempts, runtime sessions,
+invocations, messages, content blocks, items, tools, hooks, permissions, MCP,
+subtasks, provider events, usage, errors, artifacts, checks, traces, git
+provenance, workers, and queue outbox. The remaining work is deeper provider
+ingestion into these tables, not a second local durability path.
 
 The goal is not to reproduce every vendor transcript verbatim in Postgres.
 Postgres should hold durable, queryable provenance and state. Large or sensitive
@@ -25,7 +29,8 @@ Every collected fact should be classified before it is stored:
 - `sdk_fact`: a typed SDK field such as `turn_id`, `session_id`, `duration_ms`,
   `model`, `status`, `usage`, or `cost`.
 - `spawnd_fact`: orchestration state such as `run_id`, `agent_name`,
-  `worker_id`, `lease_token`, retry attempt, branch, worktree locator, check
+  `worker_id`, `lease_token`, retry attempt, submitted source repository,
+  source ref, resolved worktree base ref, branch, worktree locator, check
   command hash, and artifact ids.
 - `derived_fact`: redacted preview, content hash, prompt hash, diff stats, cost
   estimates, token totals, or status rollups.
@@ -38,6 +43,13 @@ spawnd can honestly capture subprocess command metadata, duration, exit code,
 stdout/stderr artifacts, final-message hash/size/artifact, and environment
 metadata. It should not invent internal tool calls, turns, token usage, or
 reasoning spans that the CLI boundary did not expose.
+
+Run source is also part of the provenance boundary. `runs.source_repo` is a
+worker-local git repository path that must already exist on the worker host.
+`runs.source_ref` is the submitted default worktree base. Plan
+`orchestration.worktree_source.base_ref` intentionally overrides `source_ref`.
+Remote clone-on-demand and scoped git credentials are future operational work,
+not part of the current source contract.
 
 ## Codex Runtime Mapping
 
@@ -76,8 +88,10 @@ For Codex CLI mode, collect only:
 
 Claude Agent SDK exposes a stream of typed `Message` objects plus options,
 hooks, permission events, MCP status, context usage, and result metadata.
-Spawnd currently stores only assistant text, `session_id`, and
-`total_cost_usd`; deployed mode should capture the richer contract.
+Spawnd currently records coarse session, invocation, usage, final-message, and
+error facts through the observer boundary. The normalized tables below are the
+target home for richer message, hook, permission, MCP, and tool-result
+ingestion.
 
 | Area | SDK fields or events | Store as |
 | --- | --- | --- |
@@ -103,10 +117,12 @@ message/tool-call facts.
 
 ## Normalized Postgres Target
 
-The current deployed foundation tables are useful, but the next migration
-should split aggregate columns and JSON blobs into durable entities. Keep
-`events` as the append-only ledger, but do not make it the only query path for
-common observability questions.
+The current deployed schema already contains the durable foundation and the
+first normalized runtime execution tables. Keep `events` as the append-only
+ledger, but do not make it the only query path for common observability
+questions. New provider details should land in the narrowest normalized table
+available and fall back to `provider_events` plus redacted artifacts when the
+vendor shape is still unstable.
 
 ### Identity And Ownership
 
@@ -119,16 +135,16 @@ common observability questions.
 
 `runs`
 
-- existing table, add `project_id`, `tenant_id` if spawnd becomes multi-tenant,
-  `idempotency_key`, `submitted_by`, `submitted_via`, `spec_hash`,
-  `spec_artifact_id`, `cancelled_at`, `finished_at`
+- current table includes `project_id`, `tenant_id`, `idempotency_key`,
+  `submitted_by`, `submitted_via`, `spec_hash`, `spec_artifact_id`,
+  `source_repo`, `source_ref`, `cancelled_at`, and `finished_at`
 - keep full plan spec as an object artifact if it can contain sensitive prompt
   or env content
 
 `agents`
 
 - existing table, keep as current materialized state
-- move per-attempt mutable fields out to `agent_attempts`
+- write per-attempt mutable execution facts to `agent_attempts`
 - keep `input_tokens`, `output_tokens`, and `cost_usd` only as rollups
 
 `agent_attempts`
@@ -461,31 +477,35 @@ source rows need scope and provenance so vendor schema drift is visible.
 
 ### Artifacts, Checks, Git, And Errors
 
-The existing `artifacts`, `checks`, and `git_provenance` tables are directionally
-right. Normalize and harden them as follows.
+The current `artifacts`, `checks`, and `git_provenance` tables are the deployed
+read model for output, verification, and code-change provenance. Keep them
+linked to attempts, sessions, and invocations as those ids become available.
 
 `artifacts`
 
-- use UUID primary key instead of integer for cross-service references
-- add `attempt_id`, `session_id`, `invocation_id`, `message_id`, `tool_call_id`
-- add `storage_backend`, `bucket`, `object_key`, `version_id`
-- add `raw_capture boolean not null default false`
-- add `encryption_key_ref text`
-- add `retention_class text`, `expires_at timestamptz`
+- UUID primary key for cross-service references
+- parent links: `attempt_id`, `session_id`, `invocation_id`, `message_id`,
+  `tool_call_id` where known
+- storage locator: `storage_backend`, `bucket`, `object_key`, `version_id`,
+  `uri`
+- integrity and policy: `sha256`, `size_bytes`, `content_type`,
+  `redaction_policy`, `raw_capture`, `encryption_key_ref`
+- retention: `retention_class`, `expires_at`
 - unique `(uri)` and `(sha256, size_bytes, content_type)` where practical
 
 `checks`
 
 - parent to `attempt_id` and `runtime_invocation_id`
-- split `command_hash`, `command_preview`, `shell`, `cwd_locator`, `env_metadata`
+- store `command_hash`, `command_preview`, `shell`, `cwd_locator`,
+  `env_metadata`
 - link stdout/stderr artifacts separately
 - keep exit code, signal, duration, started/completed timestamps
 
 `git_provenance`
 
-- add `attempt_id`, `base_ref`, `remote`, `worktree_locator`, `merge_base_sha`,
-  `patch_artifact_id`, `commit_message_hash`, `commit_message_preview`,
-  `changed_files_count`, insert/delete counts
+- keep `attempt_id`, `base_ref`, `remote`, `worktree_locator`,
+  `merge_base_sha`, `patch_artifact_id`, `commit_message_hash`,
+  `commit_message_preview`, changed-file and insert/delete counts
 - keep PR URL/number as optional deployment artifact, not required for all runs
 
 `runtime_errors`
@@ -535,9 +555,10 @@ provenance ledger.
 
 `trace_spans`
 
-- current table is acceptable as the mirror, but add `attempt_id`,
-  `runtime_session_id`, `runtime_invocation_id`, `otel_resource`, `otel_scope`,
-  `sampled`, `trace_flags`, and `dropped_attributes_count`
+- current table is acceptable as the mirror
+- future trace hardening can add `attempt_id`, `runtime_session_id`,
+  `runtime_invocation_id`, `otel_resource`, `otel_scope`, `sampled`,
+  `trace_flags`, and `dropped_attributes_count`
 - record redacted attributes only
 - never depend on successful OTLP export for internal status reconstruction
 
@@ -595,14 +616,19 @@ fails.
 Lease rules:
 
 - Claim is one Postgres transaction: pending or queued agent becomes running,
-  with `worker_id`, `lease_token`, `leased_until`, and an `agent_attempts` row.
+  with `worker_id`, `lease_token`, `leased_until`, and an `agent_attempts` row;
+  the same claim moves the parent run to `running`.
 - Redis queue entries carry only run/agent/attempt hints.
 - Workers renew both Postgres lease columns and Redis lease keys.
 - Reconciler requeues from Postgres, not from Redis.
 - Expired attempts move to queued or failed according to retry policy, with a
-  new `agent_attempts` row for the next attempt.
+  new `agent_attempts` row for the next attempt, then refresh aggregate run
+  status.
 - Cancellation updates `runs` and affected `agents` first, then publishes Redis
-  cancellation messages.
+  cancellation messages. It closes running attempts and clears worker
+  ownership fields.
+- Ready-agent publication records a `queue_outbox` row before writing Redis
+  wakeups.
 
 ## Redaction And Artifact Policy
 
@@ -611,7 +637,10 @@ Default policy:
 - Prompts: Postgres stores hash, size, and short redacted preview. Full prompt
   is an artifact only when product policy allows it.
 - Environment: store key names, value hashes, sensitivity labels, and source;
-  never store `.env` values.
+  never store `.env` values. Freeform output redaction must catch sensitive
+  `KEY=value` assignments, including deployed connection strings such as
+  `SPAWND_DATABASE_URL` and `SPAWND_REDIS_URL`, while preserving non-secret
+  assignments.
 - Command output: redact then upload. Store content hash, size, line count, and
   artifact id.
 - Paths: store repository-relative paths when possible; absolute paths are
@@ -666,24 +695,24 @@ Retention should be policy-driven:
 - expire raw-capture artifacts aggressively;
 - keep hash-only rows after artifact deletion so provenance remains auditable.
 
-## Migration Path From Current Tables
+## Runtime Ingestion Path
 
-1. Keep current tables as the materialized read model.
-2. Add `agent_attempts`, `runtime_sessions`, `runtime_invocations`,
-   `runtime_messages`, `runtime_content_blocks`, `runtime_tool_calls`,
-   `runtime_tool_results`, `token_usage`, `cost_usage`, `runtime_errors`, and
-   `provider_events`.
-3. Write both the old aggregate columns and new normalized rows from executors.
-4. Move `status`, `trace`, `logs`, and API read paths to the normalized tables.
-5. Backfill current deployed rows where possible:
-   - one attempt per existing agent;
-   - one session per agent with provider/runtime;
-   - one invocation per current executor run;
-   - token/cost rows from aggregate columns.
-6. Stop writing provider details into generic `events.data` except for high-level
-   run ledger events.
-7. Drop or demote aggregate columns only after all read paths use rollups from
-   normalized rows.
+1. Keep `runs`, `agents`, `events`, `artifacts`, `checks`, `trace_spans`, and
+   `git_provenance` as the deployed read model.
+2. Continue writing `agent_attempts`, `runtime_sessions`,
+   `runtime_invocations`, `token_usage`, `cost_usage`, `runtime_errors`, and
+   `provider_events` from the observer boundary.
+3. Populate `runtime_messages`, `runtime_content_blocks`, `runtime_items`,
+   `runtime_tool_calls`, `runtime_tool_results`, `runtime_plans`,
+   `runtime_file_changes`, `runtime_permissions`, `runtime_hooks`,
+   `runtime_mcp_servers`, `runtime_mcp_tools`, `runtime_subtasks`, and
+   `context_usage_snapshots` as each provider stream exposes stable facts.
+4. Keep full provider payloads and large content in redacted artifacts. Promote
+   only stable, query-worthy fields into first-class columns.
+5. Stop writing provider details into generic `events.data` except for
+   high-level run ledger events.
+6. Keep aggregate columns on `agents` as rollups; derive them from normalized
+   rows when the ingestion path is complete enough.
 
 ## Production Reliability Notes
 
