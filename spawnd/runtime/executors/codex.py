@@ -39,22 +39,6 @@ class _CodexRunResult(TypedDict, total=False):
     output_tokens: int
 
 
-def _build_agent_env(config: AgentConfig) -> dict[str, str]:
-    """Build environment variables for Codex subprocesses and checks."""
-    env = os.environ.copy()
-    env.update(
-        {
-            "SPAWND_RUN_ID": config.run_id,
-            "SPAWND_AGENT_NAME": config.name,
-            "SPAWND_PARENT_AGENT": config.parent or "",
-            "SPAWND_TREE_PATH": config.tree_path(),
-        }
-    )
-    if config.env:
-        env.update(config.env)
-    return env
-
-
 def _env_truthy(env: dict[str, str], key: str, default: bool) -> bool:
     value = env.get(key)
     if value is None:
@@ -219,7 +203,7 @@ class CodexExecutor(Executor):
                 config.observer.error("codex", error)
                 return {"success": False, "status": "failed", "cost": 0.0, "error": error}
 
-            env = _build_agent_env(config)
+            env = config.execution_env(os.environ)
             engine = _codex_engine(env)
             sdk_module = _load_codex_sdk()
 
