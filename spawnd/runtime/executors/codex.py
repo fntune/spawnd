@@ -155,6 +155,23 @@ def _build_codex_command(
     return cmd
 
 
+def _cli_scratch_dir(config: AgentConfig, env: dict[str, str]) -> Path:
+    """Return Codex CLI scratch outside the git worktree."""
+
+    runtime_root = env.get("SPAWND_RUNTIME_SCRATCH_ROOT")
+    if runtime_root:
+        return Path(runtime_root).expanduser() / config.run_id / config.name
+
+    scratch_root = env.get("SPAWND_SCRATCH_ROOT")
+    if scratch_root:
+        return Path(scratch_root).expanduser() / "runtime" / config.run_id / config.name
+
+    worktree = config.worktree.resolve()
+    if worktree.parent.name == config.run_id and worktree.parent.parent.name == "worktrees":
+        return worktree.parent.parent.parent / "runtime" / config.run_id / config.name
+    return worktree.parent / ".spawnd-runtime-scratch" / config.run_id / config.name
+
+
 async def _run_subprocess(
     args: list[str],
     *,
@@ -318,7 +335,7 @@ class CodexExecutor(Executor):
         env: dict[str, str],
     ) -> _CodexRunResult:
         logger.info(f"Starting worker {config.name} via Codex CLI in {config.worktree}")
-        scratch_dir = config.worktree / ".spawnd-scratch" / config.run_id / config.name
+        scratch_dir = _cli_scratch_dir(config, env)
         scratch_dir.mkdir(parents=True, exist_ok=True)
         last_message_path = scratch_dir / "last-message.txt"
         cmd = _build_codex_command(config, env, last_message_path)

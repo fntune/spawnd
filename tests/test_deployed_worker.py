@@ -14,7 +14,7 @@ from spawnd.coordination.redis import InMemoryCoordinator
 from spawnd.state.repository import DeployedRepository
 from spawnd.observability.telemetry import TelemetryRecorder
 from spawnd.workers.worker import DeployedWorker, reconcile_ready_agents
-from spawnd.models.specs import AgentSpec, Defaults, PlanSpec
+from spawnd.models.specs import AgentSpec, Defaults, Orchestration, PlanSpec, WorktreeSource
 from spawnd.state import schema
 from tests.deployed_helpers import make_repo
 
@@ -46,20 +46,39 @@ async def test_worker_once_executes_mock_and_records_deployed_evidence(tmp_path:
             return 'a' * 40
         if args == ['branch', '--show-current']:
             return 'spawnd/run-1/a'
-        if args == ['diff', '--shortstat', 'HEAD']:
-            return '1 file changed, 1 insertion(+)'
-        if args == ['diff', '--numstat', 'HEAD']:
-            return '1\t0\tfile.txt'
-        if args == ['diff', 'HEAD']:
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/fntune/spawnd.git'
+        if args == ['rev-parse', 'origin/main']:
+            return 'b' * 40
+        if args == ['merge-base', 'origin/main', 'HEAD']:
+            return 'b' * 40
+        if args == ['diff', '--shortstat', f"{'b' * 40}..HEAD"]:
+            return '2 files changed, 3 insertions(+), 1 deletion(-)'
+        if args == ['diff', '--numstat', f"{'b' * 40}..HEAD"]:
+            return '2\t1\tfile.txt\n1\t0\tother.txt'
+        if args == ['diff', f"{'b' * 40}..HEAD"]:
             return 'diff --git a/file.txt b/file.txt\n'
+        if args in (
+            ['diff', '--shortstat', 'HEAD'],
+            ['diff', '--numstat', 'HEAD'],
+            ['diff', 'HEAD'],
+        ):
+            return ''
+        if args == ['log', '-1', '--pretty=%B']:
+            return 'Improve deployed evidence'
         return ''
 
     monkeypatch.setattr('spawnd.workers.worker.create_worktree', fake_create_worktree)
     monkeypatch.setattr('spawnd.workers.worker._git_output', fake_git_output)
+    monkeypatch.setattr(
+        'spawnd.workers.worker._pull_request_for_branch',
+        lambda branch, cwd: ('https://github.com/fntune/spawnd/pull/9', 9),
+    )
 
     plan = PlanSpec(
         name='deploy',
         defaults=Defaults(runtime='claude', check='true'),
+        orchestration=Orchestration(worktree_source=WorktreeSource(base_ref='origin/main')),
         agents=[AgentSpec(name='a', prompt='task')],
     )
     submit_plan(plan, repository=repo, coordinator=coordinator, run_id='run-1', source_repo=str(tmp_path))
@@ -88,7 +107,19 @@ async def test_worker_once_executes_mock_and_records_deployed_evidence(tmp_path:
     assert {row['kind'] for row in invocations} == {'runtime', 'check'}
     assert repo.get_checks('run-1', 'a')[0]['exit_code'] == 0
     assert {row['kind'] for row in repo.get_artifacts('run-1', 'a')} >= {'runtime-output', 'check-output', 'patch'}
-    assert repo.get_git_provenance('run-1', 'a')[0]['head_sha'] == 'a' * 40
+    provenance = repo.get_git_provenance('run-1', 'a')[0]
+    assert provenance['base_ref'] == 'origin/main'
+    assert provenance['base_sha'] == 'b' * 40
+    assert provenance['merge_base_sha'] == 'b' * 40
+    assert provenance['head_sha'] == 'a' * 40
+    assert provenance['commit_sha'] == 'a' * 40
+    assert provenance['pr_url'] == 'https://github.com/fntune/spawnd/pull/9'
+    assert provenance['pr_number'] == 9
+    assert provenance['changed_files_count'] == 2
+    assert provenance['insertions_count'] == 3
+    assert provenance['deletions_count'] == 1
+    assert provenance['patch_artifact_id'] is not None
+    assert provenance['diff_stats']['range'] == f"{'b' * 40}..HEAD"
     assert repo.get_token_usage('run-1', 'a')[0]['scope'] == 'result_total'
     assert repo.get_cost_usage('run-1', 'a')[0]['source'] == 'fake'
     assert repo.fetch_trace_spans('run-1', 'a')

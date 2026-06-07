@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -149,7 +150,7 @@ class DeployedWorker:
             check_status = self._run_check(claimed, hydrated.check_command, worktree, session_id)
             if check_status != 'completed':
                 return check_status
-            self._record_git_provenance(claimed, worktree)
+            self._record_git_provenance(claimed, worktree, run, plan)
             input_tokens = int(runtime_result.get('input_tokens') or 0)
             output_tokens = int(runtime_result.get('output_tokens') or 0)
             cost = float(runtime_result.get('cost') or 0.0)
@@ -472,20 +473,62 @@ class DeployedWorker:
         self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
         return 'failed'
 
-    def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path) -> None:
+    def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path, run: dict, plan: PlanSpec) -> None:
+        source = plan.orchestration.worktree_source if plan.orchestration else None
+        base_ref = (source.base_ref if source and source.base_ref else None) or run.get('source_ref')
         with self.telemetry.span('spawnd.git.provenance', run_id=claimed.run_id, agent=claimed.name):
             head = _git_output(['rev-parse', 'HEAD'], worktree)
             branch = _git_output(['branch', '--show-current'], worktree)
-            shortstat = _git_output(['diff', '--shortstat', 'HEAD'], worktree, check=False)
-            numstat = _git_output(['diff', '--numstat', 'HEAD'], worktree, check=False)
-            patch = _git_output(['diff', 'HEAD'], worktree, check=False)
+            remote = _git_output(['remote', 'get-url', 'origin'], worktree, check=False) or None
+            base_sha = _git_output(['rev-parse', str(base_ref)], worktree, check=False) if base_ref else None
+            merge_base = _git_output(['merge-base', str(base_ref), 'HEAD'], worktree, check=False) if base_ref else None
+            diff_base = merge_base or base_sha
+            committed_range = f'{diff_base}..HEAD' if diff_base else None
+            if committed_range:
+                committed_shortstat = _git_output(['diff', '--shortstat', committed_range], worktree, check=False)
+                committed_numstat = _git_output(['diff', '--numstat', committed_range], worktree, check=False)
+                committed_patch = _git_output(['diff', committed_range], worktree, check=False)
+            else:
+                committed_shortstat = ''
+                committed_numstat = ''
+                committed_patch = ''
+            worktree_shortstat = _git_output(['diff', '--shortstat', 'HEAD'], worktree, check=False)
+            worktree_numstat = _git_output(['diff', '--numstat', 'HEAD'], worktree, check=False)
+            worktree_patch = _git_output(['diff', 'HEAD'], worktree, check=False)
+            commit_message = _git_output(['log', '-1', '--pretty=%B'], worktree, check=False)
+            pr_url, pr_number = _pull_request_for_branch(branch, worktree) if branch else (None, None)
+        patch_parts = [part for part in [committed_patch, worktree_patch] if part]
+        patch = '\n'.join(patch_parts)
         patch_artifact_id = self._store_text_artifact(claimed.run_id, claimed.name, 'patch', patch) if patch else None
+        changed_files_count, insertions_count, deletions_count = _numstat_summary(committed_numstat, worktree_numstat)
         self.repository.record_git_provenance(
             run_id=claimed.run_id,
             agent=claimed.name,
+            attempt_id=claimed.attempt_id,
+            base_ref=str(base_ref) if base_ref else None,
+            remote=remote,
+            worktree_locator=str(worktree),
+            base_sha=base_sha or None,
+            merge_base_sha=merge_base or None,
             head_sha=head or None,
             branch=branch or None,
-            diff_stats={'shortstat': shortstat, 'numstat': numstat, 'patch_artifact_id': patch_artifact_id},
+            commit_sha=head or None,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            patch_artifact_id=patch_artifact_id,
+            commit_message=commit_message or None,
+            changed_files_count=changed_files_count,
+            insertions_count=insertions_count,
+            deletions_count=deletions_count,
+            diff_stats={
+                'base_ref': base_ref,
+                'range': committed_range,
+                'committed_shortstat': committed_shortstat,
+                'committed_numstat': committed_numstat,
+                'worktree_shortstat': worktree_shortstat,
+                'worktree_numstat': worktree_numstat,
+                'patch_artifact_id': patch_artifact_id,
+            },
         )
 
     def _store_text_artifact(self, run_id: str, agent: str | None, kind: str, text: str) -> str:
@@ -545,6 +588,44 @@ def _provider_for_runtime(runtime: str) -> str:
 def _git_output(args: list[str], cwd: Path, *, check: bool = True) -> str:
     result = run_git(args, cwd=cwd, check=check)
     return result.stdout.strip()
+
+
+def _numstat_summary(*values: str) -> tuple[int, int, int]:
+    paths: set[str] = set()
+    insertions = 0
+    deletions = 0
+    for value in values:
+        for line in value.splitlines():
+            parts = line.split('\t')
+            if len(parts) < 3:
+                continue
+            paths.add(parts[2])
+            if parts[0].isdigit():
+                insertions += int(parts[0])
+            if parts[1].isdigit():
+                deletions += int(parts[1])
+    return (len(paths), insertions, deletions)
+
+
+def _pull_request_for_branch(branch: str, cwd: Path) -> tuple[str | None, int | None]:
+    try:
+        result = subprocess.run(
+            ['gh', 'pr', 'view', '--head', branch, '--json', 'url,number'],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return (None, None)
+    if result.returncode != 0:
+        return (None, None)
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return (None, None)
+    number = data.get('number')
+    return (data.get('url'), int(number) if isinstance(number, int) else None)
 
 
 @contextmanager
