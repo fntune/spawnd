@@ -1,6 +1,7 @@
 """Tests for deployed worker state transitions."""
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from spawnd.state.submission import submit_plan
 from spawnd.coordination.redis import InMemoryCoordinator
 from spawnd.state.repository import DeployedRepository
 from spawnd.observability.telemetry import TelemetryRecorder
-from spawnd.workers.worker import DeployedWorker, reconcile_ready_agents
+from spawnd.workers.worker import DeployedWorker, _pull_request_for_branch, reconcile_ready_agents
 from spawnd.models.specs import AgentSpec, Defaults, Orchestration, PlanSpec, WorktreeSource
 from spawnd.state import schema
 from tests.deployed_helpers import make_repo
@@ -24,6 +25,40 @@ def make_telemetry(repo: DeployedRepository) -> TelemetryRecorder:
         ResolvedTelemetryConfig(enabled=False, exporter='none', capture='full', failure_policy='degrade'),
         repo,
     )
+
+
+def test_pull_request_for_branch_uses_head_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess:
+        captured.update(
+            {
+                'args': args,
+                'cwd': cwd,
+                'capture_output': capture_output,
+                'text': text,
+                'timeout': timeout,
+            }
+        )
+        return subprocess.CompletedProcess(args, 0, '[{"url":"https://github.com/fntune/spawnd/pull/4","number":4}]', '')
+
+    monkeypatch.setattr('spawnd.workers.worker.subprocess.run', fake_run)
+
+    assert _pull_request_for_branch('spawnd/run/a', tmp_path) == ('https://github.com/fntune/spawnd/pull/4', 4)
+    assert captured == {
+        'args': ['gh', 'pr', 'list', '--head', 'spawnd/run/a', '--json', 'url,number', '--limit', '1'],
+        'cwd': tmp_path,
+        'capture_output': True,
+        'text': True,
+        'timeout': 15,
+    }
 
 
 @pytest.mark.asyncio

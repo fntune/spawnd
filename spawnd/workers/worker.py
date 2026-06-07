@@ -610,7 +610,7 @@ def _numstat_summary(*values: str) -> tuple[int, int, int]:
 def _pull_request_for_branch(branch: str, cwd: Path) -> tuple[str | None, int | None]:
     try:
         result = subprocess.run(
-            ['gh', 'pr', 'view', '--head', branch, '--json', 'url,number'],
+            ['gh', 'pr', 'list', '--head', branch, '--json', 'url,number', '--limit', '1'],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -623,6 +623,10 @@ def _pull_request_for_branch(branch: str, cwd: Path) -> tuple[str | None, int | 
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
+        return (None, None)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
         return (None, None)
     number = data.get('number')
     return (data.get('url'), int(number) if isinstance(number, int) else None)

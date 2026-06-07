@@ -11,5 +11,6 @@ build/
 venv/
 worktrees/
 .spawnd/
+.spawnd-scratch/
 .swarm/
 .vscode/
