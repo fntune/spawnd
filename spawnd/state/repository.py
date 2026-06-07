@@ -206,10 +206,30 @@ class DeployedRepository:
             conn.execute(
                 update(schema.agents)
                 .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == agent_name))
-                .values(status="cancelled", error=error, lease_token=None, leased_until=None, updated_at=now)
+                .values(
+                    status="cancelled",
+                    error=error,
+                    lease_token=None,
+                    leased_until=None,
+                    worker_id=None,
+                    heartbeat_at=None,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                update(schema.agent_attempts)
+                .where(
+                    and_(
+                        schema.agent_attempts.c.run_id == run_id,
+                        schema.agent_attempts.c.agent == agent_name,
+                        schema.agent_attempts.c.status == 'running',
+                    )
+                )
+                .values(status='cancelled', finished_at=now, updated_at=now)
             )
             self.append_event_in_transaction(conn, run_id, agent_name, "agent_cancelled", {"error": error})
-            return True
+        self.refresh_run_status(run_id)
+        return True
 
     def ready_agents(self, run_id: str) -> list[str]:
         """Return queued agents ready for Redis enqueue."""
@@ -420,14 +440,41 @@ class DeployedRepository:
         terminal = {'completed', 'failed', 'timeout', 'cancelled', 'cost_exceeded'}
         now = datetime.now(timezone.utc)
         with self.engine.begin() as conn:
-            conn.execute(update(schema.runs).where(schema.runs.c.run_id == run_id).values(status='cancelled', updated_at=now))
+            run = conn.execute(select(schema.runs.c.status).where(schema.runs.c.run_id == run_id)).mappings().first()
+            if run is None or run['status'] in terminal:
+                return 0
+            conn.execute(
+                update(schema.runs)
+                .where(schema.runs.c.run_id == run_id)
+                .values(status='cancelled', cancelled_at=now, updated_at=now)
+            )
             rows = conn.execute(select(schema.agents).where(schema.agents.c.run_id == run_id)).mappings().all()
             names = [row['name'] for row in rows if row['status'] not in terminal]
             for name in names:
                 conn.execute(
                     update(schema.agents)
                     .where(and_(schema.agents.c.run_id == run_id, schema.agents.c.name == name))
-                    .values(status='cancelled', error='Run cancelled', lease_token=None, leased_until=None, updated_at=now)
+                    .values(
+                        status='cancelled',
+                        error='Run cancelled',
+                        lease_token=None,
+                        leased_until=None,
+                        worker_id=None,
+                        heartbeat_at=None,
+                        updated_at=now,
+                    )
+                )
+            if names:
+                conn.execute(
+                    update(schema.agent_attempts)
+                    .where(
+                        and_(
+                            schema.agent_attempts.c.run_id == run_id,
+                            schema.agent_attempts.c.agent.in_(names),
+                            schema.agent_attempts.c.status == 'running',
+                        )
+                    )
+                    .values(status='cancelled', finished_at=now, updated_at=now)
                 )
             _ = self.append_event_in_transaction(conn, run_id, '_system', 'run_cancelled', {'cancelled_agents': names})
             return len(names)
