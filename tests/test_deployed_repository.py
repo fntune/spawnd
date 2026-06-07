@@ -41,6 +41,73 @@ def test_claim_agent_is_single_owner():
     assert agents[0]['worker_id'] == 'worker-1'
 
 
+def test_cancel_agent_releases_worker_ownership_and_attempt():
+    repo = make_repo()
+    repo.create_run(PlanSpec(name='deployed', agents=[AgentSpec(name='a', prompt='task')]), 'run-1')
+    claimed = repo.claim_agent('run-1', 'a', worker_id='worker-1', lease_seconds=60)
+    assert claimed is not None
+
+    assert repo.cancel_agent('run-1', 'a', 'Manager cancelled worker') is True
+
+    agent = repo.get_agent('run-1', 'a')
+    assert agent is not None
+    assert agent['status'] == 'cancelled'
+    assert agent['worker_id'] is None
+    assert agent['lease_token'] is None
+    assert agent['leased_until'] is None
+    assert agent['heartbeat_at'] is None
+    attempt = repo.get_attempts('run-1', 'a')[0]
+    assert attempt['status'] == 'cancelled'
+    assert attempt['finished_at'] is not None
+    run = repo.get_run('run-1')
+    assert run is not None
+    assert run['status'] == 'cancelled'
+
+
+def test_cancel_run_releases_worker_ownership_and_marks_cancelled_at():
+    repo = make_repo()
+    repo.create_run(
+        PlanSpec(
+            name='deployed',
+            agents=[
+                AgentSpec(name='a', prompt='task'),
+                AgentSpec(name='b', prompt='next'),
+            ],
+        ),
+        'run-1',
+    )
+    claimed = repo.claim_agent('run-1', 'a', worker_id='worker-1', lease_seconds=60)
+    assert claimed is not None
+
+    assert repo.cancel_run('run-1') == 2
+
+    run = repo.get_run('run-1')
+    assert run is not None
+    assert run['status'] == 'cancelled'
+    assert run['cancelled_at'] is not None
+    agents = {agent['name']: agent for agent in repo.get_agents('run-1')}
+    assert {agent['status'] for agent in agents.values()} == {'cancelled'}
+    assert agents['a']['worker_id'] is None
+    assert agents['a']['lease_token'] is None
+    assert agents['a']['leased_until'] is None
+    assert agents['a']['heartbeat_at'] is None
+    assert repo.get_attempts('run-1', 'a')[0]['status'] == 'cancelled'
+
+
+def test_cancel_run_does_not_rewrite_completed_run():
+    repo = make_repo()
+    repo.create_run(PlanSpec(name='deployed', agents=[AgentSpec(name='a', prompt='task')]), 'run-1')
+    repo.complete_agent('run-1', 'a')
+
+    assert repo.cancel_run('run-1') == 0
+
+    run = repo.get_run('run-1')
+    assert run is not None
+    assert run['status'] == 'completed'
+    assert run['cancelled_at'] is None
+    assert {event['event_type'] for event in repo.get_events('run-1')} == {'done', 'run_created'}
+
+
 def test_complete_agent_queues_dependents_and_records_event():
     repo = make_repo()
     plan = PlanSpec(
