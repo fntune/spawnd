@@ -39,6 +39,9 @@ def test_claim_agent_is_single_owner():
     agents = repo.get_agents('run-1')
     assert agents[0]['status'] == 'running'
     assert agents[0]['worker_id'] == 'worker-1'
+    run = repo.get_run('run-1')
+    assert run is not None
+    assert run['status'] == 'running'
 
 
 def test_cancel_agent_releases_worker_ownership_and_attempt():

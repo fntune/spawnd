@@ -329,6 +329,11 @@ class DeployedRepository:
                 'agent_claimed',
                 {'worker_id': worker_id, 'lease_seconds': lease_seconds},
             )
+            conn.execute(
+                update(schema.runs)
+                .where(schema.runs.c.run_id == run_id)
+                .values(status='running', updated_at=now)
+            )
             return ClaimedAgent(
                 run_id=run_id,
                 name=agent_name,
@@ -394,6 +399,7 @@ class DeployedRepository:
                     lease_token=None,
                     leased_until=None,
                     worker_id=None,
+                    heartbeat_at=None,
                     updated_at=now,
                 )
             )
@@ -920,6 +926,7 @@ class DeployedRepository:
 
         now = now or datetime.now(timezone.utc)
         requeued: list[dict[str, Any]] = []
+        affected_run_ids: set[str] = set()
         with self.engine.begin() as conn:
             rows = conn.execute(
                 select(schema.agents).where(
@@ -971,8 +978,11 @@ class DeployedRepository:
                         .values(status='expired', finished_at=now, updated_at=now)
                     )
                 _ = self.append_event_in_transaction(conn, row['run_id'], row['name'], 'lease_expired', {'requeued': can_retry})
+                affected_run_ids.add(str(row['run_id']))
                 if can_retry:
                     requeued.append({'run_id': row['run_id'], 'agent': row['name']})
+        for run_id in affected_run_ids:
+            self.refresh_run_status(run_id)
         return requeued
 
     def append_event(
@@ -1062,6 +1072,9 @@ class DeployedRepository:
         size_bytes: int,
         redaction_policy: str,
         content_type: str,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        invocation_id: str | None = None,
     ) -> str:
         artifact_id = uuid4().hex
         with self.engine.begin() as conn:
@@ -1070,6 +1083,9 @@ class DeployedRepository:
                     id=artifact_id,
                     run_id=run_id,
                     agent=agent,
+                    attempt_id=attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
                     kind=kind,
                     uri=uri,
                     sha256=sha256,
@@ -1096,17 +1112,31 @@ class DeployedRepository:
         exit_code: int,
         duration_ms: int,
         output_artifact_id: str | None = None,
+        attempt_id: str | None = None,
+        runtime_invocation_id: str | None = None,
+        shell: str | None = None,
+        cwd_locator: str | None = None,
+        env_metadata: dict[str, Any] | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         with self.engine.begin() as conn:
             conn.execute(
                 insert(schema.checks).values(
                     run_id=run_id,
                     agent=agent,
+                    attempt_id=attempt_id,
+                    runtime_invocation_id=runtime_invocation_id,
                     command_hash=stable_hash(command),
                     command_preview=redact_freeform_text(command[:500]),
+                    shell=shell,
+                    cwd_locator=cwd_locator,
+                    env_metadata=redact_attributes(env_metadata or {}) if env_metadata is not None else None,
                     exit_code=exit_code,
                     duration_ms=duration_ms,
                     output_artifact_id=output_artifact_id,
+                    started_at=started_at,
+                    completed_at=completed_at,
                 )
             )
 
