@@ -1,9 +1,12 @@
 """Claude Agent SDK executor."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import logging
 from typing import TYPE_CHECKING
 
+from spawnd.runtime.executors.refs import resolve_refs
 from spawnd.runtime.executors.base import Executor, register
 from spawnd.tools.factory import create_manager_tools, create_worker_tools
 
@@ -49,16 +52,18 @@ class ClaudeExecutor(Executor):
                 )
             )
             server = create_sdk_mcp_server("spawnd", "1.0.0", coord_tools)
-            allowed_tools = list(toolset.code) + [f"mcp__spawnd__{op}" for op in toolset.coord]
+            external_mcp_servers, external_allowed_tools = _external_mcp_servers(config)
+            allowed_tools = list(toolset.code) + [f"mcp__spawnd__{op}" for op in toolset.coord] + external_allowed_tools
             options = ClaudeAgentOptions(
                 cwd=str(config.worktree),
                 env=config.execution_env(),
-                mcp_servers={"spawnd": server},
+                mcp_servers={"spawnd": server, **external_mcp_servers},
                 allowed_tools=allowed_tools,
                 model=config.model,
                 max_turns=config.max_iterations,
                 permission_mode="bypassPermissions" if toolset.write_allowed else "plan",
                 system_prompt=toolset.system_prompt,
+                resume=config.resume_session_id,
             )
             starter = (
                 "Execute the task. Spawn workers as needed. When all work is done, summarize the result."
@@ -71,19 +76,24 @@ class ClaudeExecutor(Executor):
             final_messages: list[str] = []
             logger.info("Starting %s %s via Claude SDK", role_label, config.name)
             async with ClaudeSDKClient(options=options) as client:
-                await client.query(f"{starter}\n\nTask: {config.prompt}")
-                async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        iteration += 1
-                        config.observer.invocation("assistant_message", {"iteration": iteration})
-                        for block in message.content or []:
-                            if isinstance(block, TextBlock):
-                                final_messages.append(block.text)
-                                config.observer.final(block.text)
-                    if isinstance(message, ResultMessage):
-                        session_id = message.session_id
-                        total_cost = message.total_cost_usd or 0.0
-                        break
+                try:
+                    await client.query(f"{starter}\n\nTask: {config.prompt}")
+                    async for message in client.receive_response():
+                        if isinstance(message, AssistantMessage):
+                            iteration += 1
+                            config.observer.invocation("assistant_message", {"iteration": iteration})
+                            for block in message.content or []:
+                                if isinstance(block, TextBlock):
+                                    final_messages.append(block.text)
+                                    config.observer.final(block.text)
+                        if isinstance(message, ResultMessage):
+                            session_id = message.session_id
+                            total_cost = message.total_cost_usd or 0.0
+                            break
+                except asyncio.CancelledError:
+                    with suppress(Exception):
+                        await client.interrupt()
+                    raise
             final_text = "\n".join(final_messages[-3:])
             config.observer.usage(cost_usd=total_cost, source="sdk", raw={"iterations": iteration})
             if total_cost > config.max_cost_usd:
@@ -113,3 +123,34 @@ class ClaudeExecutor(Executor):
 
 
 register(ClaudeExecutor())
+
+
+def _external_mcp_servers(config: AgentConfig) -> tuple[dict[str, dict], list[str]]:
+    servers: dict[str, dict] = {}
+    allowed_tools: list[str] = []
+    for spec in config.mcp_servers or []:
+        if spec.type == "stdio":
+            if not spec.command:
+                raise ValueError(f"MCP server {spec.name} requires command")
+            server_config: dict = {"type": "stdio", "command": spec.command}
+            if spec.args:
+                server_config["args"] = list(spec.args)
+            env = resolve_refs(spec.env_refs, f"MCP server {spec.name} env")
+            if env:
+                server_config["env"] = env
+        elif spec.type in {"http", "sse"}:
+            if not spec.url:
+                raise ValueError(f"MCP server {spec.name} requires url")
+            server_config = {"type": spec.type, "url": spec.url}
+            headers = dict(spec.headers)
+            headers.update(resolve_refs(spec.header_refs, f"MCP server {spec.name} headers"))
+            if headers:
+                server_config["headers"] = headers
+        else:
+            raise ValueError(f"Unsupported MCP server type: {spec.type}")
+        servers[spec.name] = server_config
+        if spec.tools:
+            allowed_tools.extend([f"mcp__{spec.name}__{tool}" for tool in spec.tools])
+        else:
+            allowed_tools.append(f"mcp__{spec.name}__*")
+    return servers, allowed_tools

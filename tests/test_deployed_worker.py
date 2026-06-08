@@ -1,7 +1,9 @@
 """Tests for deployed worker state transitions."""
 from __future__ import annotations
 
+import asyncio
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,8 +16,9 @@ from spawnd.state.submission import submit_plan
 from spawnd.coordination.redis import InMemoryCoordinator
 from spawnd.state.repository import DeployedRepository
 from spawnd.observability.telemetry import TelemetryRecorder
-from spawnd.workers.worker import DeployedWorker, _pull_request_for_branch, reconcile_ready_agents
-from spawnd.models.specs import AgentSpec, Defaults, Orchestration, PlanSpec, WorktreeSource
+from spawnd.runtime.agent_config import resolve_agent_plan_config
+from spawnd.workers.worker import DeployedWorker, WorkerRunResult, _pull_request_for_branch, _resolve_agent_env, drain_queue_outbox, reconcile_ready_agents
+from spawnd.models.specs import AgentSpec, CleanupPolicy, CommandPolicy, Defaults, GitDelivery, Orchestration, PlanSpec, WorktreeSetup, WorktreeSource
 from spawnd.state import schema
 from tests.deployed_helpers import make_repo
 
@@ -37,6 +40,22 @@ def make_git_repo(tmp_path: Path, name: str) -> Path:
     subprocess.run(['git', 'add', '.'], cwd=repo, check=True, capture_output=True)
     subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=repo, check=True, capture_output=True)
     return repo
+
+
+def test_resolve_agent_env_uses_refs_without_persisted_values(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv('SPAWND_SECRET_OPENAI_API_KEY', 'secret-value')
+    agent = AgentSpec(
+        name='a',
+        prompt='task',
+        env={'SAFE_FLAG': '1'},
+        env_refs={'OPENAI_API_KEY': 'SPAWND_SECRET_OPENAI_API_KEY'},
+    )
+
+    assert _resolve_agent_env(agent) == {'SAFE_FLAG': '1', 'OPENAI_API_KEY': 'secret-value'}
+
+    monkeypatch.delenv('SPAWND_SECRET_OPENAI_API_KEY')
+    with pytest.raises(ValueError, match='SPAWND_SECRET_OPENAI_API_KEY'):
+        _resolve_agent_env(agent)
 
 
 def test_pull_request_for_branch_uses_head_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -127,7 +146,7 @@ async def test_worker_once_executes_mock_and_records_deployed_evidence(tmp_path:
     plan = PlanSpec(
         name='deploy',
         defaults=Defaults(runtime='claude', check='true'),
-        orchestration=Orchestration(worktree_source=WorktreeSource(base_ref='origin/main')),
+        orchestration=Orchestration(worktree_source=WorktreeSource(base_ref='origin/main'), git=GitDelivery(commit=False)),
         agents=[AgentSpec(name='a', prompt='task')],
     )
     submit_plan(
@@ -190,6 +209,91 @@ async def test_worker_once_executes_mock_and_records_deployed_evidence(tmp_path:
     assert repo.get_token_usage('run-1', 'a')[0]['scope'] == 'result_total'
     assert repo.get_cost_usage('run-1', 'a')[0]['source'] == 'fake'
     assert repo.fetch_trace_spans('run-1', 'a')
+
+
+@pytest.mark.asyncio
+async def test_runtime_timeout_marks_agent_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = make_repo()
+    plan = PlanSpec(
+        name='deploy',
+        defaults=Defaults(runtime='claude', runtime_timeout_seconds=1),
+        agents=[AgentSpec(name='a', prompt='task')],
+    )
+    repo.create_run(plan, 'run-1')
+    claimed = repo.claim_agent('run-1', 'a', worker_id='worker-1', lease_seconds=60)
+    assert claimed is not None
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    session_id = repo.record_runtime_session(
+        attempt_id=claimed.attempt_id,
+        run_id=claimed.run_id,
+        agent=claimed.name,
+        provider='anthropic',
+        runtime='claude_sdk',
+    )
+
+    async def slow_mock(config):
+        _ = config
+        await asyncio.sleep(5)
+        return {'success': True, 'status': 'completed'}
+
+    monkeypatch.setattr('spawnd.workers.worker.run_worker_mock', slow_mock)
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=InMemoryCoordinator(),
+        artifacts=InMemoryArtifactStore(),
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+        use_mock=True,
+    )
+    hydrated = resolve_agent_plan_config(plan.agents[0], plan.defaults)
+
+    status, result = await worker._run_runtime(plan, plan.agents[0], claimed, worktree, hydrated, session_id, 'anthropic', {})
+
+    assert status == 'timeout'
+    assert result['status'] == 'timeout'
+    assert repo.get_agent('run-1', 'a')['status'] == 'timeout'
+    assert repo.get_runtime_invocations('run-1', 'a')[0]['status'] == 'timeout'
+
+
+def test_check_timeout_records_timeout_failure(tmp_path: Path):
+    repo = make_repo()
+    plan = PlanSpec(name='deploy', defaults=Defaults(check_timeout_seconds=1), agents=[AgentSpec(name='a', prompt='task')])
+    repo.create_run(plan, 'run-1')
+    claimed = repo.claim_agent('run-1', 'a', worker_id='worker-1', lease_seconds=60)
+    assert claimed is not None
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    session_id = repo.record_runtime_session(
+        attempt_id=claimed.attempt_id,
+        run_id=claimed.run_id,
+        agent=claimed.name,
+        provider='anthropic',
+        runtime='claude_sdk',
+    )
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=InMemoryCoordinator(),
+        artifacts=InMemoryArtifactStore(),
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+        use_mock=True,
+    )
+    command = f'{sys.executable} -c "import time; time.sleep(5)"'
+
+    status = worker._run_check(
+        claimed,
+        command,
+        worktree,
+        session_id,
+        timeout_seconds=1,
+        command_policy=CommandPolicy(mode='unrestricted'),
+    )
+
+    assert status == 'timeout'
+    assert repo.get_agent('run-1', 'a')['status'] == 'timeout'
+    check = repo.get_checks('run-1', 'a')[0]
+    assert check['exit_code'] == 124
 
 
 def test_worker_uses_submitted_source_ref_when_plan_has_no_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -289,6 +393,45 @@ async def test_worker_fails_claimed_agent_when_source_repo_is_missing(tmp_path: 
     assert {row['kind'] for row in repo.get_artifacts('run-1', 'a')} == {'source-error'}
 
 
+@pytest.mark.asyncio
+async def test_worker_blocks_write_runtime_without_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = make_repo()
+    coordinator = InMemoryCoordinator()
+    artifacts = InMemoryArtifactStore()
+    source_repo = make_git_repo(tmp_path, 'source')
+    worktree = tmp_path / 'worktree'
+    monkeypatch.delenv('SPAWND_RUNTIME_ISOLATION', raising=False)
+
+    def fake_create_worktree(*args, **kwargs):
+        _ = (args, kwargs)
+        worktree.mkdir(parents=True, exist_ok=True)
+        return worktree
+
+    monkeypatch.setattr('spawnd.workers.worker.create_worktree', fake_create_worktree)
+    plan = PlanSpec(name='deploy', defaults=Defaults(runtime='claude'), agents=[AgentSpec(name='a', prompt='task')])
+    submit_plan(plan, repository=repo, coordinator=coordinator, run_id='run-1', source_repo=str(source_repo))
+
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=coordinator,
+        artifacts=artifacts,
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+        source_path=source_repo,
+        use_mock=False,
+    )
+
+    result = await worker.run_once(block_ms=0)
+
+    assert result.claimed is True
+    assert result.status == 'failed'
+    agent = repo.get_agent('run-1', 'a')
+    assert agent is not None
+    assert agent['status'] == 'failed'
+    assert 'SPAWND_RUNTIME_ISOLATION' in agent['error']
+    assert {row['source'] for row in repo.get_runtime_errors('run-1', 'a')} == {'runtime_isolation'}
+
+
 def test_reconcile_recovers_lost_redis_ready_hint():
     repo = make_repo()
     coordinator = InMemoryCoordinator()
@@ -306,6 +449,82 @@ def test_reconcile_recovers_lost_redis_ready_hint():
         ).mappings().all()
     assert len(outbox) == 2
     assert {row['status'] for row in outbox} == {'published'}
+
+
+def test_drain_queue_outbox_publishes_pending_rows():
+    repo = make_repo()
+    coordinator = InMemoryCoordinator()
+    plan = PlanSpec(name='deploy', agents=[AgentSpec(name='a', prompt='task')])
+    repo.create_run(plan, 'run-1')
+    outbox_id = repo.record_queue_outbox('run-1', 'a', 'agent_ready', {'run_id': 'run-1', 'agent': 'a'})
+
+    published = drain_queue_outbox(repo, coordinator)
+
+    assert published == [{'run_id': 'run-1', 'agent': 'a'}]
+    assert [job.agent for job in coordinator.jobs] == ['a']
+    with repo.engine.connect() as conn:
+        row = conn.execute(select(schema.queue_outbox).where(schema.queue_outbox.c.id == outbox_id)).mappings().one()
+    assert row['status'] == 'published'
+    assert row['published_at'] is not None
+
+
+def test_worker_cleanup_policy_removes_worktree_and_records_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = make_repo()
+    plan = PlanSpec(
+        name='deploy',
+        orchestration=Orchestration(cleanup=CleanupPolicy(worktree=True)),
+        agents=[AgentSpec(name='a', prompt='task')],
+    )
+    repo.create_run(plan, 'run-1')
+    claimed = repo.claim_agent('run-1', 'a', worker_id='worker-1')
+    assert claimed is not None
+    removed = []
+    monkeypatch.setattr('spawnd.workers.worker.remove_worktree', lambda worktree, repo_path: removed.append((worktree, repo_path)))
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=InMemoryCoordinator(),
+        artifacts=InMemoryArtifactStore(),
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+    )
+
+    worker._cleanup_worktree_if_configured(plan, claimed, tmp_path / 'worktree', tmp_path)
+
+    assert removed == [(tmp_path / 'worktree', tmp_path)]
+    assert repo.get_events('run-1')[0]['event_type'] == 'worktree_cleaned'
+
+
+def test_setup_cache_key_changes_with_lockfile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = make_repo()
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=InMemoryCoordinator(),
+        artifacts=InMemoryArtifactStore(),
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+        source_path=tmp_path,
+    )
+    source = make_git_repo(tmp_path, 'source')
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    lockfile = worktree / 'pnpm-lock.yaml'
+    setup = WorktreeSetup(command='pnpm install', cache=True)
+    monkeypatch.setenv('SPAWND_SETUP_CACHE_ROOT', str(tmp_path / 'cache'))
+
+    lockfile.write_text('a')
+    first = worker._setup_cache_env(setup, worktree, source)
+    lockfile.write_text('b')
+    second = worker._setup_cache_env(setup, worktree, source)
+
+    assert first['SPAWND_SETUP_CACHE_KEY'] != second['SPAWND_SETUP_CACHE_KEY']
+    assert first['SPAWND_SETUP_CACHE_DIR'].startswith(str(tmp_path / 'cache'))
+    assert first['npm_config_store_dir'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['npm_config_cache'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['YARN_CACHE_FOLDER'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['BUN_INSTALL_CACHE_DIR'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['UV_CACHE_DIR'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['PIP_CACHE_DIR'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
+    assert first['POETRY_CACHE_DIR'].startswith(first['SPAWND_SETUP_CACHE_DIR'])
 
 
 def test_reconcile_publishes_outbox_for_expired_retryable_lease():
@@ -367,3 +586,45 @@ def test_expire_stale_lease_requeues_retryable_agent():
     assert agent['retry_attempt'] == 1
     assert repo.get_attempts('run-1', 'a')[0]['status'] == 'expired'
     assert repo.get_run('run-1')['status'] == 'queued'
+
+
+@pytest.mark.asyncio
+async def test_worker_poll_reaps_stale_leases_before_next_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = make_repo()
+    coordinator = InMemoryCoordinator()
+    plan = PlanSpec(
+        name='deploy',
+        agents=[AgentSpec(name='a', prompt='task', on_failure='retry', retry_count=2)],
+    )
+    repo.create_run(plan, 'run-1')
+    claimed = repo.claim_agent('run-1', 'a', worker_id='lost-worker', lease_seconds=60)
+    assert claimed is not None
+    stale = datetime.now(timezone.utc) - timedelta(seconds=5)
+    with repo.engine.begin() as conn:
+        conn.execute(
+            update(schema.agents)
+            .where(schema.agents.c.run_id == 'run-1')
+            .values(leased_until=stale)
+        )
+
+    worker = DeployedWorker(
+        repository=repo,
+        coordinator=coordinator,
+        artifacts=InMemoryArtifactStore(),
+        telemetry=make_telemetry(repo),
+        worker_id='worker-1',
+        source_path=tmp_path,
+        use_mock=True,
+    )
+
+    async def stop_after_reap(*, block_ms: int) -> WorkerRunResult:
+        _ = block_ms
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(worker, 'run_once', stop_after_reap)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker.run_poll(block_ms=0)
+
+    assert repo.get_agent('run-1', 'a')['status'] == 'queued'
+    assert [job.agent for job in coordinator.jobs] == ['a']

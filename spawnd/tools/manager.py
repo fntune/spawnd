@@ -32,29 +32,43 @@ def _worker_name(manager_name: str, name: str) -> str:
 
 
 async def spawn_worker(run_id: str, manager_name: str, name: str, prompt: str, check: str | None = None, model: str = "sonnet") -> str:
-    """Record a worker spawn request.
-
-    Dynamic manager spawning is represented as a durable event; deployed run
-    scheduling remains owned by submitted plan rows.
-    """
+    """Create and enqueue a dynamic worker for a manager agent."""
 
     if not VALID_WORKER_NAME.fullmatch(name):
         return f"Invalid worker name: {name}"
     worker_name = _worker_name(manager_name, name)
-    _repository().append_event(
+    repo = _repository()
+    result = repo.spawn_worker_agent(
         run_id,
         manager_name,
-        "spawn_worker_requested",
-        {
-            "worker": worker_name,
-            "prompt_hash": stable_hash(prompt),
-            "prompt_preview": redact_freeform_text(prompt[:500]),
-            "check_hash": stable_hash(check or ""),
-            "check_preview": redact_freeform_text((check or "")[:500]),
-            "model": model,
-        },
+        worker_name,
+        prompt=prompt,
+        check=check,
+        model=model,
     )
-    return f"Spawn request recorded for worker: {worker_name}"
+    if not result.get("created"):
+        repo.append_event(
+            run_id,
+            manager_name,
+            "spawn_worker_rejected",
+            {
+                "worker": worker_name,
+                "reason": result.get("reason"),
+                "prompt_hash": stable_hash(prompt),
+                "prompt_preview": redact_freeform_text(prompt[:500]),
+                "check_hash": stable_hash(check or ""),
+                "check_preview": redact_freeform_text((check or "")[:500]),
+                "model": model,
+            },
+        )
+        return f"Worker not spawned: {worker_name} ({result.get('reason')})"
+    outbox_id = repo.record_queue_outbox(run_id, worker_name, "agent_ready", {"run_id": run_id, "agent": worker_name})
+    coordinator = _coordinator()
+    if coordinator is not None:
+        coordinator.enqueue_agent(run_id, worker_name)
+        repo.mark_outbox_published(outbox_id)
+        coordinator.publish_event(run_id, {"type": "agent_queued", "agent": worker_name})
+    return f"Spawned worker: {worker_name}"
 
 
 async def respond_to_clarification(run_id: str, manager_name: str, clarification_id: str, response: str) -> str:

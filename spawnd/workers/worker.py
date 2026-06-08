@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import hashlib
 import json
 import os
 import socket
@@ -13,13 +15,17 @@ from pathlib import Path
 from typing import Iterator
 
 from spawnd.artifacts.store import ArtifactStore, store_redacted_text_artifact
+from spawnd.config import load_backend_config
 from spawnd.state.submission import claim_next_agent, enqueue_newly_ready_agents
 from spawnd.coordination.redis import CoordinationPlane
 from spawnd.state.repository import ClaimedAgent, DeployedRepository
+from spawnd.notifications.webhook import NotificationDispatcher
 from spawnd.observability.telemetry import TelemetryRecorder
-from spawnd.gitops.worktrees import GitError, create_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
+from spawnd.gitops.worktrees import GitError, commit as commit_worktree, create_worktree, push_branch, remove_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
 from spawnd.io.plan_builder import load_shared_context
 from spawnd.models.specs import AgentSpec, PlanSpec
+from spawnd.policy.commands import CommandPolicyError, validate_plan_command
+from spawnd.policy.isolation import RuntimeIsolationError, validate_runtime_isolation
 from spawnd.runtime.agent_config import resolve_agent_plan_config
 from spawnd.runtime.agent_run import AgentConfig
 from spawnd.runtime.executor import run_manager, run_worker, run_worker_mock
@@ -43,6 +49,7 @@ class RunSource:
     repo_path: Path
     base_ref: str | None
     fetch: bool
+    git_env: dict[str, str]
 
 
 class DeployedWorker:
@@ -69,6 +76,7 @@ class DeployedWorker:
         self.lease_seconds = lease_seconds
         self.use_mock = use_mock
         self.capture_raw_artifacts = False
+        self.notifications = NotificationDispatcher(repository=self.repository, config=load_backend_config())
 
     async def run_once(self, *, block_ms: int = 1000) -> WorkerRunResult:
         """Claim and execute at most one queued agent."""
@@ -91,8 +99,22 @@ class DeployedWorker:
         """Continuously claim and execute agents."""
 
         while True:
-            result = await self.run_once(block_ms=block_ms)
-            if not result.claimed:
+            try:
+                drain_queue_outbox(self.repository, self.coordinator)
+                for expired in self.repository.expire_stale_leases():
+                    self._enqueue_agent(expired['run_id'], expired['agent'])
+                result = await self.run_once(block_ms=block_ms)
+                if not result.claimed:
+                    await asyncio.sleep(idle_sleep_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.repository.record_worker_heartbeat(
+                    self.worker_id,
+                    hostname=socket.gethostname(),
+                    capacity={'pid': os.getpid(), 'last_error': str(exc)[:1000]},
+                    status='error',
+                )
                 await asyncio.sleep(idle_sleep_seconds)
 
     def heartbeat(self) -> None:
@@ -124,8 +146,7 @@ class DeployedWorker:
                 source='spawnd',
                 message=error,
             )
-            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
-            return 'failed'
+            return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
         provider = _provider_for_runtime(claimed.runtime)
         try:
             source = self._resolve_run_source(run, plan)
@@ -152,8 +173,7 @@ class DeployedWorker:
                 message=error,
                 details_artifact_id=artifact_id,
             )
-            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
-            return 'failed'
+            return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
         with _pushd(source.repo_path):
             try:
                 worktree = self._prepare_worktree(plan, agent, claimed, source)
@@ -174,8 +194,7 @@ class DeployedWorker:
                     message=error,
                     details_artifact_id=artifact_id,
                 )
-                self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
-                return 'failed'
+                return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
             hydrated = resolve_agent_plan_config(agent, plan.defaults)
             session_id = self.repository.record_runtime_session(
                 attempt_id=claimed.attempt_id,
@@ -197,15 +216,111 @@ class DeployedWorker:
                     message=self.telemetry.initialization_error,
                     retryable=False,
                 )
-            setup_ok = self._run_setup_if_needed(plan, agent, claimed, worktree, session_id, source.repo_path)
+            try:
+                agent_env = {**_resolve_agent_env(agent), 'SPAWND_AGENT_TYPE': claimed.type}
+            except ValueError as exc:
+                error = str(exc)
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'env-error',
+                    error,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    source='env',
+                    message=error,
+                    details_artifact_id=artifact_id,
+                    retryable=False,
+                )
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
+                return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
+            try:
+                validate_runtime_isolation(
+                    runtime=claimed.runtime,
+                    agent_type=claimed.type,
+                    write_allowed=hydrated.write_allowed,
+                    use_mock=self.use_mock,
+                    policy=plan.orchestration.runtime_isolation if plan.orchestration else None,
+                    env=os.environ,
+                )
+            except RuntimeIsolationError as exc:
+                error = str(exc)
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'runtime-isolation-error',
+                    error,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    source='runtime_isolation',
+                    message=error,
+                    details_artifact_id=artifact_id,
+                    retryable=False,
+                )
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
+                return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
+            setup_ok = self._run_setup_if_needed(plan, agent, claimed, worktree, session_id, source.repo_path, agent_env)
             if not setup_ok:
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
                 return 'failed'
-            runtime_status, runtime_result = await self._run_runtime(plan, agent, claimed, worktree, hydrated, session_id, provider)
+            runtime_status, runtime_result = await self._run_runtime(plan, agent, claimed, worktree, hydrated, session_id, provider, agent_env)
             if runtime_status != 'completed':
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
                 return runtime_status
-            check_status = self._run_check(claimed, hydrated.check_command, worktree, session_id)
+            command_policy = plan.orchestration.command_policy if plan.orchestration else None
+            check_status = self._run_check(
+                claimed,
+                hydrated.check_command,
+                worktree,
+                session_id,
+                timeout_seconds=hydrated.check_timeout_seconds,
+                command_policy=command_policy,
+            )
             if check_status != 'completed':
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
                 return check_status
+            try:
+                self._deliver_git_work(plan, claimed, worktree)
+            except Exception as exc:
+                error = str(exc)
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'git-delivery-error',
+                    error,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    source='git_delivery',
+                    message=error,
+                    details_artifact_id=artifact_id,
+                    retryable=_is_retryable_runtime_error(error),
+                )
+                self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
+                return self._fail_claimed_agent(
+                    claimed,
+                    error,
+                    attempt_id=claimed.attempt_id,
+                    error_id=error_id,
+                    retryable=_is_retryable_runtime_error(error),
+                )
             self._record_git_provenance(claimed, worktree, source)
             input_tokens = int(runtime_result.get('input_tokens') or 0)
             output_tokens = int(runtime_result.get('output_tokens') or 0)
@@ -242,6 +357,8 @@ class DeployedWorker:
             for name in ready:
                 self._enqueue_agent(claimed.run_id, name)
             enqueue_newly_ready_agents(claimed.run_id, repository=self.repository, coordinator=self.coordinator)
+            self._notify_current_run(claimed.run_id, claimed.name, reason='agent_completed')
+            self._cleanup_worktree_if_configured(plan, claimed, worktree, source.repo_path)
             return 'completed'
 
     def _resolve_run_source(self, run: dict, plan: PlanSpec) -> RunSource:
@@ -249,7 +366,12 @@ class DeployedWorker:
 
         configured = plan.orchestration.worktree_source if plan.orchestration else None
         source_repo = run.get('source_repo') or str(self.source_path)
-        candidate = Path(str(source_repo)).expanduser()
+        source_repo_text = str(source_repo)
+        git_env = _resolve_env_refs(configured.env_refs if configured else {}, 'git source')
+        if _looks_like_git_remote(source_repo_text):
+            candidate = self._ensure_source_clone(source_repo_text, git_env)
+        else:
+            candidate = Path(source_repo_text).expanduser()
         if not candidate.exists():
             raise GitError(f'Run source repository does not exist: {candidate}')
         result = run_git(['rev-parse', '--show-toplevel'], cwd=candidate, check=False)
@@ -263,28 +385,54 @@ class DeployedWorker:
             repo_path=repo_path,
             base_ref=str(base_ref) if base_ref else None,
             fetch=configured.fetch if configured else False,
+            git_env=git_env,
         )
 
+    def _ensure_source_clone(self, source_repo: str, git_env: dict[str, str]) -> Path:
+        """Clone or fetch a submitted remote source repo into worker scratch."""
+
+        cache_root = Path(
+            os.environ.get(
+                'SPAWND_SOURCE_CACHE_ROOT',
+                str(Path(os.environ.get('SPAWND_SCRATCH_ROOT', str(self.source_path / '.spawnd-scratch'))) / 'sources'),
+            )
+        ).expanduser()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        repo_hash = hashlib.sha256(source_repo.encode('utf-8')).hexdigest()[:16]
+        repo_path = cache_root / repo_hash
+        lock_path = cache_root / f'{repo_hash}.lock'
+        with _file_lock(lock_path):
+            if repo_path.exists():
+                result = run_git(['rev-parse', '--show-toplevel'], cwd=repo_path, check=False)
+                if result.returncode != 0:
+                    raise GitError(f'Cached source is not a git repository: {repo_path}')
+                _ = run_git(['fetch', '--prune', 'origin'], cwd=repo_path, env=git_env)
+                return repo_path
+            _ = run_git(['clone', source_repo, str(repo_path)], cwd=cache_root, env=git_env)
+            return repo_path
+
     def _prepare_worktree(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, source: RunSource) -> Path:
-        with self.telemetry.span('spawnd.worktree.create', run_id=claimed.run_id, agent=claimed.name):
-            worktree = create_worktree(
-                claimed.run_id,
-                claimed.name,
-                repo_path=source.repo_path,
-                base_ref=source.base_ref,
-                fetch=source.fetch,
-            )
-        if agent.depends_on:
-            dep_context = plan.orchestration.dependency_context if plan.orchestration else None
-            setup_worktree_with_deps(
-                claimed.run_id,
-                claimed.name,
-                list(agent.depends_on),
-                worktree,
-                mode=dep_context.mode if dep_context else 'full',
-                include_paths=dep_context.include_paths if dep_context else None,
-                exclude_paths=dep_context.exclude_paths if dep_context else None,
-            )
+        with _git_repo_lock(source.repo_path):
+            with self.telemetry.span('spawnd.worktree.create', run_id=claimed.run_id, agent=claimed.name):
+                worktree = create_worktree(
+                    claimed.run_id,
+                    claimed.name,
+                    repo_path=source.repo_path,
+                    base_ref=source.base_ref,
+                    fetch=source.fetch,
+                    env=source.git_env,
+                )
+            if agent.depends_on:
+                dep_context = plan.orchestration.dependency_context if plan.orchestration else None
+                setup_worktree_with_deps(
+                    claimed.run_id,
+                    claimed.name,
+                    list(agent.depends_on),
+                    worktree,
+                    mode=dep_context.mode if dep_context else 'full',
+                    include_paths=dep_context.include_paths if dep_context else None,
+                    exclude_paths=dep_context.exclude_paths if dep_context else None,
+                )
         self.repository.update_agent_worktree(
             claimed.run_id,
             claimed.name,
@@ -293,7 +441,7 @@ class DeployedWorker:
         )
         return worktree
 
-    def _run_setup_if_needed(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, worktree: Path, session_id: str, source_path: Path) -> bool:
+    def _run_setup_if_needed(self, plan: PlanSpec, agent: AgentSpec, claimed: ClaimedAgent, worktree: Path, session_id: str, source_path: Path, agent_env: dict[str, str]) -> bool:
         setup = plan.orchestration.worktree_setup if plan.orchestration else None
         if setup is None:
             return True
@@ -306,13 +454,50 @@ class DeployedWorker:
         )
         with self.telemetry.span('spawnd.worktree.setup', run_id=claimed.run_id, agent=claimed.name, attributes={'command': setup.command}):
             try:
+                validate_plan_command(
+                    setup.command,
+                    plan.orchestration.command_policy if plan.orchestration else None,
+                    purpose='setup',
+                )
+                cache_env = self._setup_cache_env(setup, worktree, source_path)
+                if cache_env:
+                    self.repository.append_event(
+                        claimed.run_id,
+                        claimed.name,
+                        'setup_cache_bound',
+                        {'cache_key': cache_env['SPAWND_SETUP_CACHE_KEY']},
+                    )
                 result = run_worktree_setup(
                     worktree,
                     source_path,
                     setup.command,
-                    env={**agent.env, **setup.env},
+                    env={**agent_env, **setup.env, **cache_env},
                     timeout_seconds=setup.timeout_seconds,
                 )
+            except CommandPolicyError as exc:
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'setup-error',
+                    str(exc),
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    source='command_policy',
+                    message=str(exc),
+                    details_artifact_id=artifact_id,
+                    retryable=False,
+                )
+                self.repository.finish_runtime_invocation(invocation_id, status='failed', error_id=error_id, final_message_artifact_id=artifact_id)
+                self._fail_claimed_agent(claimed, str(exc), attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
+                return False
             except Exception as exc:
                 artifact_id = self._store_text_artifact(
                     claimed.run_id,
@@ -334,7 +519,7 @@ class DeployedWorker:
                     details_artifact_id=artifact_id,
                 )
                 self.repository.finish_runtime_invocation(invocation_id, status='failed', error_id=error_id)
-                self.repository.fail_agent(claimed.run_id, claimed.name, str(exc), attempt_id=claimed.attempt_id, error_id=error_id)
+                self._fail_claimed_agent(claimed, str(exc), attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
                 return False
         artifact_id = self._store_text_artifact(
             claimed.run_id,
@@ -357,6 +542,7 @@ class DeployedWorker:
         hydrated: object,
         session_id: str,
         provider: str,
+        agent_env: dict[str, str],
     ) -> tuple[str, dict]:
         invocation_id = self.repository.start_runtime_invocation(
             attempt_id=claimed.attempt_id,
@@ -366,6 +552,7 @@ class DeployedWorker:
             kind='runtime',
         )
         shared_context = load_shared_context(plan.shared_context) if plan.shared_context else ''
+        resume_ids = self.repository.latest_provider_resume_ids(claimed.run_id, claimed.name, provider)
         observer = PostgresRuntimeObserver(
             repository=self.repository,
             run_id=claimed.run_id,
@@ -384,20 +571,39 @@ class DeployedWorker:
             check_command=hydrated.check_command or 'true',
             model=hydrated.model,
             max_iterations=hydrated.max_iterations,
+            runtime_timeout_seconds=hydrated.runtime_timeout_seconds,
+            check_timeout_seconds=hydrated.check_timeout_seconds,
             max_cost_usd=hydrated.max_cost_usd,
-            env=agent.env or None,
+            env=agent_env or None,
             shared_context=shared_context,
             runtime=hydrated.runtime,
+            write_allowed=hydrated.write_allowed,
+            codex=hydrated.codex,
+            mcp_servers=hydrated.mcp_servers,
+            resume_session_id=resume_ids.get('provider_session_id'),
+            resume_thread_id=resume_ids.get('provider_thread_id'),
             observer=observer,
         )
+        for server in hydrated.mcp_servers:
+            self.repository.record_runtime_mcp_server(
+                session_id=session_id,
+                name=server.name,
+                status='configured',
+                scope=claimed.name,
+                config={'type': server.type, 'command': server.command, 'args': server.args, 'url': server.url, 'headers': sorted(server.headers.keys()), 'header_refs': sorted(server.header_refs.keys()), 'env_refs': sorted(server.env_refs.keys()), 'tools': server.tools},
+            )
         try:
             with self.telemetry.span('spawnd.runtime.invocation', run_id=claimed.run_id, agent=claimed.name, attributes={'runtime': claimed.runtime}):
                 if self.use_mock:
-                    result = await self._with_lease_renewal(claimed, run_worker_mock(config))
+                    awaitable = self._with_lease_renewal(claimed, run_worker_mock(config))
                 elif claimed.type == 'manager':
-                    result = await self._with_lease_renewal(claimed, run_manager(config))
+                    awaitable = self._with_lease_renewal(claimed, run_manager(config))
                 else:
-                    result = await self._with_lease_renewal(claimed, run_worker(config))
+                    awaitable = self._with_lease_renewal(claimed, run_worker(config))
+                if hydrated.runtime_timeout_seconds:
+                    result = await asyncio.wait_for(awaitable, timeout=hydrated.runtime_timeout_seconds)
+                else:
+                    result = await awaitable
         except asyncio.CancelledError:
             observer.flush()
             error = 'Run cancelled'
@@ -423,6 +629,39 @@ class DeployedWorker:
             self.repository.finish_runtime_invocation(invocation_id, status='cancelled', error_id=error_id)
             self.repository.cancel_agent(claimed.run_id, claimed.name, error)
             return ('cancelled', {'success': False, 'status': 'cancelled', 'error': error})
+        except asyncio.TimeoutError:
+            observer.flush()
+            error = f'Runtime timed out after {hydrated.runtime_timeout_seconds}s'
+            artifact_id = self._store_text_artifact(
+                claimed.run_id,
+                claimed.name,
+                'runtime-error',
+                error,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+            )
+            error_id = self.repository.record_runtime_error(
+                run_id=claimed.run_id,
+                agent=claimed.name,
+                attempt_id=claimed.attempt_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                source=f'{claimed.runtime}_runtime',
+                message=error,
+                details_artifact_id=artifact_id,
+                retryable=True,
+            )
+            self.repository.finish_runtime_invocation(invocation_id, status='timeout', error_id=error_id)
+            status = self._fail_claimed_agent(
+                claimed,
+                error,
+                attempt_id=claimed.attempt_id,
+                error_id=error_id,
+                retryable=True,
+                terminal_status='timeout',
+            )
+            return (status, {'success': False, 'status': 'timeout', 'error': error})
         except Exception as exc:
             observer.flush()
             artifact_id = self._store_text_artifact(
@@ -445,8 +684,14 @@ class DeployedWorker:
                 details_artifact_id=artifact_id,
             )
             self.repository.finish_runtime_invocation(invocation_id, status='failed', error_id=error_id)
-            self.repository.fail_agent(claimed.run_id, claimed.name, str(exc), attempt_id=claimed.attempt_id, error_id=error_id)
-            return ('failed', {'success': False, 'error': str(exc)})
+            status = self._fail_claimed_agent(
+                claimed,
+                str(exc),
+                attempt_id=claimed.attempt_id,
+                error_id=error_id,
+                retryable=_is_retryable_runtime_error(str(exc)),
+            )
+            return (status, {'success': False, 'error': str(exc)})
         observer.flush()
         status = str(result.get('status') or 'failed')
         success = bool(result.get('success')) and status == 'completed'
@@ -477,6 +722,10 @@ class DeployedWorker:
             else artifact_id
         )
         if result.get('vendor_session_id'):
+            if provider == 'openai' and claimed.runtime == 'codex':
+                self.repository.update_runtime_session_provider_ids(session_id, provider_thread_id=str(result.get('vendor_session_id')))
+            else:
+                self.repository.update_runtime_session_provider_ids(session_id, provider_session_id=str(result.get('vendor_session_id')))
             self.repository.append_event(
                 claimed.run_id,
                 claimed.name,
@@ -500,8 +749,17 @@ class DeployedWorker:
                 message=error,
                 details_artifact_id=artifact_id,
             )
-            self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
-            return ('failed', result)
+            terminal_status = 'cost_exceeded' if status == 'cost_exceeded' else 'failed'
+            retryable = False if terminal_status == 'cost_exceeded' else _is_retryable_runtime_error(error)
+            next_status = self._fail_claimed_agent(
+                claimed,
+                error,
+                attempt_id=claimed.attempt_id,
+                error_id=error_id,
+                retryable=retryable,
+                terminal_status=terminal_status,
+            )
+            return (next_status, result)
         if observer.input_tokens and not result.get('input_tokens'):
             result['input_tokens'] = observer.input_tokens
         if observer.output_tokens and not result.get('output_tokens'):
@@ -548,7 +806,16 @@ class DeployedWorker:
                 task.cancel()
                 return
 
-    def _run_check(self, claimed: ClaimedAgent, command: str, worktree: Path, session_id: str) -> str:
+    def _run_check(
+        self,
+        claimed: ClaimedAgent,
+        command: str,
+        worktree: Path,
+        session_id: str,
+        *,
+        timeout_seconds: int | None,
+        command_policy,
+    ) -> str:
         invocation_id = self.repository.start_runtime_invocation(
             attempt_id=claimed.attempt_id,
             run_id=claimed.run_id,
@@ -558,7 +825,98 @@ class DeployedWorker:
         )
         started = datetime.now(timezone.utc)
         with self.telemetry.span('spawnd.check', run_id=claimed.run_id, agent=claimed.name, attributes={'command': command}):
-            result = subprocess.run(command or 'true', shell=True, cwd=worktree, capture_output=True, text=True)
+            try:
+                validate_plan_command(command or 'true', command_policy, purpose='check')
+                result = subprocess.run(command or 'true', shell=True, cwd=worktree, capture_output=True, text=True, timeout=timeout_seconds)
+            except CommandPolicyError as exc:
+                completed = datetime.now(timezone.utc)
+                duration_ms = max(0, int((completed - started).total_seconds() * 1000))
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'check-output',
+                    str(exc),
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                )
+                self.repository.record_check(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    command=command or 'true',
+                    exit_code=126,
+                    duration_ms=duration_ms,
+                    output_artifact_id=artifact_id,
+                    attempt_id=claimed.attempt_id,
+                    runtime_invocation_id=invocation_id,
+                    shell='/bin/sh',
+                    cwd_locator=str(worktree),
+                    started_at=started,
+                    completed_at=completed,
+                )
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    source='command_policy',
+                    message=str(exc),
+                    details_artifact_id=artifact_id,
+                    retryable=False,
+                )
+                self.repository.finish_runtime_invocation(invocation_id, status='failed', exit_code=126, error_id=error_id, final_message_artifact_id=artifact_id)
+                return self._fail_claimed_agent(claimed, str(exc), attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
+            except subprocess.TimeoutExpired as exc:
+                completed = datetime.now(timezone.utc)
+                duration_ms = max(0, int((completed - started).total_seconds() * 1000))
+                stdout = exc.stdout.decode('utf-8', errors='replace') if isinstance(exc.stdout, bytes) else (exc.stdout or '')
+                stderr = exc.stderr.decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else (exc.stderr or '')
+                artifact_id = self._store_text_artifact(
+                    claimed.run_id,
+                    claimed.name,
+                    'check-output',
+                    f'[stdout]\n{stdout}\n[stderr]\n{stderr}',
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                )
+                command_text = command or 'true'
+                self.repository.record_check(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    command=command_text,
+                    exit_code=124,
+                    duration_ms=duration_ms,
+                    output_artifact_id=artifact_id,
+                    attempt_id=claimed.attempt_id,
+                    runtime_invocation_id=invocation_id,
+                    shell='/bin/sh',
+                    cwd_locator=str(worktree),
+                    started_at=started,
+                    completed_at=completed,
+                )
+                error = f'check timed out after {timeout_seconds}s'
+                error_id = self.repository.record_runtime_error(
+                    run_id=claimed.run_id,
+                    agent=claimed.name,
+                    attempt_id=claimed.attempt_id,
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    source='check',
+                    message=error,
+                    details_artifact_id=artifact_id,
+                    retryable=False,
+                )
+                self.repository.finish_runtime_invocation(invocation_id, status='timeout', exit_code=124, error_id=error_id, final_message_artifact_id=artifact_id)
+                return self._fail_claimed_agent(
+                    claimed,
+                    error,
+                    attempt_id=claimed.attempt_id,
+                    error_id=error_id,
+                    retryable=False,
+                    terminal_status='timeout',
+                )
         completed = datetime.now(timezone.utc)
         duration_ms = max(0, int((completed - started).total_seconds() * 1000))
         artifact_id = self._store_text_artifact(
@@ -603,8 +961,7 @@ class DeployedWorker:
             message=error,
             details_artifact_id=artifact_id,
         )
-        self.repository.fail_agent(claimed.run_id, claimed.name, error, attempt_id=claimed.attempt_id, error_id=error_id)
-        return 'failed'
+        return self._fail_claimed_agent(claimed, error, attempt_id=claimed.attempt_id, error_id=error_id, retryable=False)
 
     def _record_git_provenance(self, claimed: ClaimedAgent, worktree: Path, source: RunSource) -> None:
         base_ref = source.base_ref
@@ -674,6 +1031,31 @@ class DeployedWorker:
             },
         )
 
+    def _deliver_git_work(self, plan: PlanSpec, claimed: ClaimedAgent, worktree: Path) -> None:
+        git_delivery = plan.orchestration.git if plan.orchestration and plan.orchestration.git else None
+        commit_enabled = True if git_delivery is None else git_delivery.commit
+        branch = claimed.branch or f'spawnd/{claimed.run_id}/{claimed.name}'
+        if commit_enabled:
+            with self.telemetry.span('spawnd.git.commit', run_id=claimed.run_id, agent=claimed.name):
+                commit_worktree(worktree, f'spawnd: {claimed.run_id}/{claimed.name}')
+            self.repository.append_event(claimed.run_id, claimed.name, 'git_committed', {'branch': branch})
+        if git_delivery and git_delivery.push:
+            git_env = _resolve_env_refs(git_delivery.env_refs, 'git delivery')
+            with self.telemetry.span('spawnd.git.push', run_id=claimed.run_id, agent=claimed.name):
+                push_branch(
+                    worktree,
+                    branch,
+                    remote=git_delivery.remote,
+                    timeout_seconds=git_delivery.push_timeout_seconds,
+                    env=git_env,
+                )
+            self.repository.append_event(
+                claimed.run_id,
+                claimed.name,
+                'git_pushed',
+                {'branch': branch, 'remote': git_delivery.remote},
+            )
+
     def _store_text_artifact(
         self,
         run_id: str,
@@ -708,8 +1090,95 @@ class DeployedWorker:
             invocation_id=invocation_id,
         )
 
+    def _setup_cache_env(self, setup, worktree: Path, source_path: Path) -> dict[str, str]:
+        if not getattr(setup, 'cache', False):
+            return {}
+        key_parts = [setup.command]
+        result = run_git(['rev-parse', 'HEAD'], cwd=source_path, check=False)
+        key_parts.append(result.stdout.strip() if result.returncode == 0 else '')
+        for relative_path in setup.cache_paths:
+            path = worktree / relative_path
+            if not path.exists() or not path.is_file():
+                continue
+            key_parts.append(relative_path)
+            key_parts.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        cache_key = hashlib.sha256('\0'.join(key_parts).encode('utf-8')).hexdigest()
+        cache_root = Path(
+            os.environ.get(
+                'SPAWND_SETUP_CACHE_ROOT',
+                str(Path(os.environ.get('SPAWND_SCRATCH_ROOT', str(self.source_path / '.spawnd-scratch'))) / 'setup-cache'),
+            )
+        ).expanduser()
+        cache_dir = cache_root / cache_key
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        package_cache_dirs = {
+            'npm_config_cache': cache_dir / 'npm',
+            'npm_config_store_dir': cache_dir / 'pnpm-store',
+            'YARN_CACHE_FOLDER': cache_dir / 'yarn',
+            'BUN_INSTALL_CACHE_DIR': cache_dir / 'bun',
+            'UV_CACHE_DIR': cache_dir / 'uv',
+            'PIP_CACHE_DIR': cache_dir / 'pip',
+            'POETRY_CACHE_DIR': cache_dir / 'poetry',
+        }
+        for path in package_cache_dirs.values():
+            path.mkdir(parents=True, exist_ok=True)
+        return {
+            'SPAWND_SETUP_CACHE_KEY': cache_key,
+            'SPAWND_SETUP_CACHE_DIR': str(cache_dir),
+            **{key: str(path) for key, path in package_cache_dirs.items()},
+        }
+
+    def _cleanup_worktree_if_configured(self, plan: PlanSpec, claimed: ClaimedAgent, worktree: Path, repo_path: Path) -> None:
+        cleanup = plan.orchestration.cleanup if plan.orchestration and plan.orchestration.cleanup else None
+        if not cleanup or not cleanup.worktree:
+            return
+        try:
+            with _git_repo_lock(repo_path):
+                remove_worktree(worktree, repo_path=repo_path)
+        except Exception as exc:
+            self.repository.append_event(
+                claimed.run_id,
+                claimed.name,
+                'cleanup_error',
+                {'worktree': str(worktree), 'error': str(exc)[:1000]},
+            )
+            return
+        self.repository.append_event(claimed.run_id, claimed.name, 'worktree_cleaned', {'worktree': str(worktree)})
+
     def _enqueue_agent(self, run_id: str, agent: str) -> None:
         _publish_ready_agent(self.repository, self.coordinator, run_id, agent)
+
+    def _fail_claimed_agent(
+        self,
+        claimed: ClaimedAgent,
+        error: str,
+        *,
+        attempt_id: str | None,
+        error_id: str | None,
+        retryable: bool | None = None,
+        terminal_status: str = 'failed',
+    ) -> str:
+        queued = self.repository.fail_agent(
+            claimed.run_id,
+            claimed.name,
+            error,
+            attempt_id=attempt_id,
+            error_id=error_id,
+            retryable=retryable,
+            terminal_status=terminal_status,
+        )
+        for name in queued:
+            self._enqueue_agent(claimed.run_id, name)
+        if claimed.name not in queued:
+            self._notify_current_run(claimed.run_id, claimed.name, reason=f'agent_{terminal_status}')
+        return 'queued' if claimed.name in queued else terminal_status
+
+    def _notify_current_run(self, run_id: str, agent: str | None, *, reason: str) -> None:
+        run = self.repository.get_run(run_id)
+        if run is None:
+            return
+        spec = run.get('spec') if isinstance(run.get('spec'), dict) else {}
+        self.notifications.maybe_notify_run(plan_spec=spec, run=run, agent=agent, reason=reason)
 
 
 def reconcile_ready_agents(repository: DeployedRepository, coordinator: CoordinationPlane) -> list[dict[str, str]]:
@@ -732,6 +1201,26 @@ def reconcile_ready_agents(repository: DeployedRepository, coordinator: Coordina
     return requeued
 
 
+def drain_queue_outbox(repository: DeployedRepository, coordinator: CoordinationPlane, *, limit: int = 100) -> list[dict[str, str]]:
+    """Publish pending outbox rows to Redis and mark them delivered."""
+
+    published: list[dict[str, str]] = []
+    for row in repository.pending_queue_outbox(limit=limit):
+        outbox_id = str(row['id'])
+        run_id = str(row['run_id'])
+        agent = str(row['agent']) if row.get('agent') is not None else None
+        try:
+            if row['event_type'] == 'agent_ready' and agent:
+                coordinator.enqueue_agent(run_id, agent)
+                published.append({'run_id': run_id, 'agent': agent})
+            else:
+                coordinator.publish_event(run_id, {'type': row['event_type'], **dict(row.get('payload') or {})})
+            repository.mark_outbox_published(outbox_id)
+        except Exception as exc:
+            repository.mark_outbox_retry(outbox_id, str(exc))
+    return published
+
+
 def _publish_ready_agent(repository: DeployedRepository, coordinator: CoordinationPlane, run_id: str, agent: str) -> None:
     outbox_id = repository.record_queue_outbox(run_id, agent, 'agent_ready', {'run_id': run_id, 'agent': agent})
     coordinator.enqueue_agent(run_id, agent)
@@ -748,6 +1237,60 @@ def _provider_for_runtime(runtime: str) -> str:
     if runtime in {'codex', 'openai'}:
         return 'openai'
     return 'unknown'
+
+
+def _resolve_agent_env(agent: AgentSpec) -> dict[str, str]:
+    env = dict(agent.env)
+    env.update(_resolve_env_refs(agent.env_refs, 'agent'))
+    return env
+
+
+def _resolve_env_refs(refs: dict[str, str], label: str) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for target_key, source_key in sorted(refs.items()):
+        value = os.environ.get(source_key)
+        if value is None:
+            missing.append(source_key)
+            continue
+        resolved[target_key] = value
+    if missing:
+        raise ValueError(f"Missing {label} environment secret refs: {', '.join(missing)}")
+    return resolved
+
+
+def _is_retryable_runtime_error(message: str) -> bool:
+    lowered = message.lower()
+    non_retryable = [
+        'not installed',
+        'unauthorized',
+        'forbidden',
+        'authentication',
+        'invalid api key',
+        'permission denied',
+        'approval denied',
+    ]
+    if any(pattern in lowered for pattern in non_retryable):
+        return False
+    retryable = [
+        'rate limit',
+        'too many requests',
+        '429',
+        '500',
+        '502',
+        '503',
+        '504',
+        'timeout',
+        'timed out',
+        'connection reset',
+        'temporarily',
+        'temporary',
+        'overloaded',
+        'unavailable',
+        'try again',
+        'retry',
+    ]
+    return any(pattern in lowered for pattern in retryable)
 
 
 def _git_output(args: list[str], cwd: Path, *, check: bool = True) -> str:
@@ -799,9 +1342,29 @@ def _pull_request_for_branch(branch: str, cwd: Path) -> tuple[str | None, int | 
 
 @contextmanager
 def _pushd(path: Path) -> Iterator[None]:
-    old = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(old)
+    _ = path
+    yield
+
+
+def _looks_like_git_remote(source_repo: str) -> bool:
+    return (
+        '://' in source_repo
+        or source_repo.startswith('git@')
+        or source_repo.startswith('ssh://')
+    )
+
+
+@contextmanager
+def _file_lock(lock_path: Path) -> Iterator[None]:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('w') as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _git_repo_lock(repo_path: Path) -> Iterator[None]:
+    yield from _file_lock(repo_path / '.spawnd-git.lock')

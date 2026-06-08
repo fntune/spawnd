@@ -1,19 +1,18 @@
 """OpenAI function_tool wrappers for code-manipulation capabilities.
 
-Gives OpenAI agents parity with Claude's built-in ``Read / Write / Edit /
-Bash / Glob / Grep`` tools. The implementations are stdlib-only so they
-work anywhere the spawnd runtime does.
+Gives OpenAI agents parity with Claude's default ``Read / Write / Edit /
+Glob / Grep`` tools. The implementations are stdlib-only so they work
+anywhere the spawnd runtime does.
 
-Tools that modify state (``Write``, ``Edit``, ``Bash``) are skipped when
-``write_allowed=False`` — the executor constructs its tool list by
-calling :func:`build_code_tools` with the toolset's ``write_allowed``
-flag.
+Tools that modify state (``Write``, ``Edit``) are skipped when
+``write_allowed=False``. Shell execution is intentionally not exposed to
+agents by default; workers run setup and check commands through the
+separate command-policy path.
 """
 from __future__ import annotations
 import fnmatch
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 try:
@@ -21,15 +20,11 @@ try:
 except ImportError as err:
     raise ImportError("spawnd.tools.openai_code requires the openai-agents SDK. Install with: pip install 'spawnd.dev[openai]'") from err
 
-def build_code_tools(cwd: Path, *, write_allowed: bool=True, env: dict[str, str] | None=None) -> list[Any]:
+def build_code_tools(cwd: Path, *, write_allowed: bool=True) -> list[Any]:
     """Return the list of code tools an OpenAI agent should have.
 
     Closes over ``cwd`` so each agent stays inside its own worktree.
     """
-    shell_env = os.environ.copy()
-    if env:
-        _ = shell_env.update(env)
-
     @function_tool(name_override='Read')
     def read_file(path: str) -> str:
         """Read a UTF-8 text file and return its contents."""
@@ -84,17 +79,7 @@ def build_code_tools(cwd: Path, *, write_allowed: bool=True, env: dict[str, str]
         _ = full.write_text(text.replace(old_string, new_string), encoding='utf-8')
         return f'Edited {path} (1 replacement)'
 
-    @function_tool(name_override='Bash')
-    def bash_tool(command: str, timeout_seconds: int=120) -> str:
-        """Run ``command`` in a shell rooted at the agent's worktree."""
-        try:
-            result = subprocess.run(command, shell=True, cwd=str(cwd), capture_output=True, env=shell_env, text=True, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            return f'ERROR: command timed out after {timeout_seconds}s'
-        tail = f'{result.stdout}\n{result.stderr}'.strip()
-        exit_note = '' if result.returncode == 0 else f'\n(exit code {result.returncode})'
-        return tail + exit_note
-    _ = tools.extend([write_file, edit_file, bash_tool])
+    _ = tools.extend([write_file, edit_file])
     return tools
 
 def _resolve(cwd: Path, path: str) -> Path:

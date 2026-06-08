@@ -42,6 +42,22 @@ def test_parse_plan_yaml_accepts_codex_runtime():
     assert plan.agents[0].runtime is None
     assert plan.agents[1].runtime == 'codex'
 
+def test_parse_plan_yaml_with_runtime_and_check_timeouts():
+    """Parse default and per-agent execution timeouts."""
+    yaml_content = '\nname: timeout-plan\ndefaults:\n  runtime_timeout_seconds: 600\n  check_timeout_seconds: 120\nagents:\n  - name: worker1\n    prompt: Do something\n  - name: worker2\n    prompt: Do something else\n    runtime_timeout_seconds: 60\n    check_timeout_seconds: 15\n'
+    plan = parse_plan_yaml(yaml_content)
+    assert plan.defaults.runtime_timeout_seconds == 600
+    assert plan.defaults.check_timeout_seconds == 120
+    assert plan.agents[0].runtime_timeout_seconds is None
+    assert plan.agents[1].runtime_timeout_seconds == 60
+    assert plan.agents[1].check_timeout_seconds == 15
+
+def test_parse_plan_yaml_with_env_refs():
+    """Parse explicit environment secret references."""
+    yaml_content = '\nname: env-ref-plan\nagents:\n  - name: worker1\n    prompt: Do something\n    env_refs:\n      OPENAI_API_KEY: SPAWND_SECRET_OPENAI_API_KEY\n'
+    plan = parse_plan_yaml(yaml_content)
+    assert plan.agents[0].env_refs == {'OPENAI_API_KEY': 'SPAWND_SECRET_OPENAI_API_KEY'}
+
 def test_parse_plan_yaml_with_deployed_observability_config():
     """Parse deployed telemetry and artifact orchestration config."""
     yaml_content = '\nname: deployed-plan\norchestration:\n  telemetry:\n    enabled: true\n    exporter: otlp\n    capture: full\n    failure_policy: fail\n  artifacts:\n    capture_raw: false\nagents:\n  - name: worker1\n    prompt: Do something\n'

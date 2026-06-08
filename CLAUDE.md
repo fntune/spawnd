@@ -11,7 +11,8 @@ Spawnd is deployed-first agent orchestration.
 - Worker worktrees and files are execution scratch.
 - CLI, Python API, and HTTP API must read and write the same deployed services.
 - A run's `source_repo` is the execution source of truth when present. It is a
-  local git repository path reachable by the worker, not a remote clone request.
+  local git repository path or a git remote URL. Remote sources are cloned into
+  a worker-local source cache and remain scratch.
 
 ## Ownership Tree
 
@@ -28,6 +29,9 @@ Spawnd is deployed-first agent orchestration.
 - `spawnd/tools/`: agent coordination tools backed by deployed events and
   responses.
 - `spawnd/gitops/`: worktree, branch, diff, setup, and dependency mechanics.
+- `spawnd/policy/`: centralized execution policy such as plan command
+  allowlists.
+- `spawnd/notifications/`: external notification delivery edges.
 
 Do not add a parallel state path. New state transitions belong in
 `spawnd/state/repository.py` or a typed state service under `spawnd/state/`.
@@ -80,6 +84,11 @@ resolve `runs.source_repo`, require it to exist, require `git rev-parse
 worktree setup, runtime execution, checks, and provenance. Plan
 `orchestration.worktree_source.base_ref` overrides `runs.source_ref`.
 
+Plan-provided setup and check commands must be validated through
+`spawnd/policy/commands.py` before subprocess execution. The default policy is
+an allowlist with restricted shell syntax; trusted templates may explicitly use
+`orchestration.command_policy.mode: unrestricted`.
+
 Worker flow:
 
 1. read Redis job hint;
@@ -103,6 +112,11 @@ HTTP submit accepts an inline serialized plan only. Do not add server-local file
 path reads such as `plan_file` to `POST /runs`; the CLI can read local files and
 then submit the parsed plan. Validate HTTP plans at the boundary and reject
 unknown request fields.
+
+All HTTP routes except health, readiness, metrics, and GitHub webhooks require
+bearer auth. GitHub webhooks must verify `X-Hub-Signature-256` before template
+submission. Templates, schedules, webhook submissions, CLI `run`, and HTTP
+`POST /runs` must all use the same deployed submission path.
 
 ## Verification
 

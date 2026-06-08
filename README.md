@@ -30,6 +30,7 @@ export SPAWND_ARTIFACTS_BUCKET='spawnd-artifacts'
 export SPAWND_ARTIFACTS_ENDPOINT='https://s3.example.com'
 export SPAWND_ARTIFACTS_REGION='us-east-1'
 export SPAWND_ARTIFACTS_PREFIX='prod'
+export SPAWND_API_TOKEN='change-me'
 ```
 
 Telemetry uses standard `OTEL_*` variables plus plan or env settings:
@@ -102,13 +103,110 @@ orchestration:
   worktree_source:
     base_ref: origin/main
     fetch: true
+    env_refs:
+      GIT_ASKPASS: SPAWND_GIT_ASKPASS
   worktree_setup:
     command: bash scripts/worktree/setup.sh
+    cache: true
+    cache_paths:
+      - pnpm-lock.yaml
+  command_policy:
+    mode: allowlist
+  cleanup:
+    worktree: true
+  concurrency_limit: 2
 ```
 
-Spawnd does not clone remote repositories yet. For unattended runs, every worker
-host must already have access to the submitted local `source_repo` path and any
-refs used by `source_ref` or `worktree_source.base_ref`.
+`source_repo` may be a local git repository path or a git remote URL. Remote
+sources are cloned/fetched into the worker source cache under
+`SPAWND_SOURCE_CACHE_ROOT` or `$SPAWND_SCRATCH_ROOT/sources`. Worker worktrees
+remain scratch; durable evidence is still Postgres rows plus object-store
+artifacts.
+
+Git clone/fetch/push credentials should be provided through explicit
+`env_refs` on `orchestration.worktree_source` or `orchestration.git`. The plan
+stores only the reference names; workers resolve actual secret values from their
+environment at runtime.
+
+Plan-provided setup and check commands are constrained by
+`orchestration.command_policy`. The default allowlist permits common test and
+package-manager commands and rejects shell control syntax such as pipes,
+semicolons, redirects, and command substitution. Use `mode: unrestricted` only
+for trusted internal templates.
+
+When `worktree_setup.cache` is true, workers compute a secret-free cache key
+from the setup command, source HEAD, and configured lockfiles, create a cache
+directory, and pass `SPAWND_SETUP_CACHE_KEY` plus `SPAWND_SETUP_CACHE_DIR` to
+the setup command. Workers also point common package-manager caches inside that
+directory with `npm_config_cache`, `npm_config_store_dir`, `YARN_CACHE_FOLDER`,
+`BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and
+`POETRY_CACHE_DIR`.
+
+`orchestration.cleanup.worktree: true` removes worker scratch worktrees after
+terminal agent execution. Provenance, patches, checks, logs, and pushed branch
+state remain durable in Postgres, object storage, and git.
+
+`orchestration.concurrency_limit` is enforced at the Postgres claim boundary
+for a run, so multiple worker processes cannot exceed the configured number of
+simultaneously running agents.
+
+Reviewer/read-only agents can be made non-mutating:
+
+```yaml
+agents:
+  - name: reviewer
+    use_role: reviewer
+    write_allowed: false
+    prompt: Review the current diff and report risks.
+```
+
+The built-in `reviewer` role defaults to `write_allowed: false`; explicit agent
+configuration can override it.
+
+Codex agents can set runtime safety policy per agent instead of relying on
+process-wide env defaults:
+
+```yaml
+agents:
+  - name: codex-worker
+    runtime: codex
+    codex:
+      engine: cli
+      sandbox: workspace-write
+      approval_mode: deny_all
+      ephemeral: true
+    prompt: Make the requested change.
+```
+
+Codex SDK runs estimate cost from exposed token counts and enforce
+`max_cost_usd`. Codex CLI runs with `--json`, records subprocess facts, extracts
+session/token facts when the CLI emits them, and estimates cost from those token
+counts. When a stored Codex CLI session id exists, retries use
+`codex exec resume <session-id>`.
+
+Claude, OpenAI, and Codex CLI agents can receive external MCP servers from the
+plan. Secret material must be passed by reference and resolved from the worker
+environment:
+
+```yaml
+defaults:
+  runtime: claude
+  mcp_servers:
+    - name: docs
+      type: http
+      url: https://mcp.example.com
+      header_refs:
+        Authorization: SPAWND_MCP_DOCS_AUTHORIZATION
+      tools:
+        - search
+```
+
+Configured MCP servers are recorded in `runtime_mcp_servers` with a config hash.
+Codex supports stdio MCP servers and streamable HTTP servers with bearer-token
+environment references. Codex rejects unsupported MCP shapes, such as SSE,
+literal HTTP headers, and non-Authorization header refs, at plan validation.
+Codex manager agents use the CLI engine so they can access Spawnd coordination
+tools through the internal `spawnd` MCP server.
 
 ## Workers
 
@@ -123,6 +221,12 @@ Run a polling worker:
 ```bash
 spawnd worker --poll
 ```
+
+Write-capable real provider runtimes require an explicit worker isolation
+boundary. Set `SPAWND_RUNTIME_ISOLATION=container`, `jail`, or `vm` on deployed
+workers after placing them in that boundary. Mock runs and readonly agents do
+not require it. Without this marker, the worker fails the agent before setup or
+provider execution instead of running write/edit tools on an unisolated host.
 
 Recover queue hints from Postgres:
 
@@ -145,6 +249,21 @@ lease state while executing, write artifacts and provenance, and enqueue newly
 ready dependents through the queue outbox plus Redis wakeups. Redis entries are
 wakeups only: reconciliation rebuilds missing hints from Postgres and records
 outbox rows before publishing.
+
+When a provider exposes a resumable session id, workers persist it on the
+runtime session. Claude retries pass the latest prior session id back through
+the SDK `resume` option. OpenAI retries reuse the latest server-managed
+conversation id through the Agents SDK `conversation_id` option. Codex CLI
+retries resume with `codex exec resume` when a stored session id exists; Codex
+SDK retries use `thread_resume` or `resume_thread` when the installed SDK exposes
+one, and fail clearly rather than silently cold-starting if it does not.
+
+Manager agents can spawn dynamic workers. `spawn_worker` creates a real queued
+agent row, updates the durable run spec used by workers, records a queue outbox
+row, and publishes a Redis wakeup when Redis is available. Spawned agents are
+still claimed and executed through the same Postgres worker path. Claude and
+OpenAI managers receive coordination tools through their SDK tool interfaces;
+Codex managers receive the same tools through the internal Spawnd MCP server.
 
 If the submitted source path is missing or is not a git repository, the worker
 fails the claimed agent with a redacted source-error artifact and a
@@ -173,6 +292,7 @@ Control commands:
 spawnd cancel <run-id>
 spawnd resume <run-id>
 spawnd pr create <run-id> --agent parser
+spawnd pr merge <run-id> --agent parser --method squash
 ```
 
 ## HTTP API
@@ -185,6 +305,9 @@ spawnd serve --host 0.0.0.0 --port 8765
 
 Endpoints:
 
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
 - `POST /runs`
 - `GET /runs/{run_id}`
 - `GET /runs/{run_id}/events`
@@ -194,7 +317,17 @@ Endpoints:
 - `GET /runs/{run_id}/provenance`
 - `POST /runs/{run_id}/cancel`
 - `POST /runs/{run_id}/resume`
+- `POST /templates`
+- `GET /templates`
+- `POST /templates/{template_id}/runs`
+- `POST /schedules`
+- `POST /schedules/run-due`
+- `POST /submissions`
+- `POST /submissions/drain`
+- `POST /webhooks/github/{template_id}`
 - `POST /workers/reconcile`
+- `POST /workers/outbox/drain`
+- `GET /workers`
 
 `POST /runs` accepts a serialized plan body. It does not read server-local plan
 files.
@@ -215,6 +348,36 @@ files.
 
 The server validates the plan at the HTTP boundary and rejects unknown request
 fields.
+
+All HTTP routes except health, readiness, metrics, and GitHub webhooks require
+`Authorization: Bearer $SPAWND_API_TOKEN`. GitHub webhooks verify
+`X-Hub-Signature-256` against `SPAWND_GITHUB_WEBHOOK_SECRET`.
+
+Reusable templates and schedules are durable Postgres records:
+
+```bash
+spawnd templates put contributor -f contributor-template.yaml \
+  --source-repo-template '{clone_url}' \
+  --source-ref-template '{after}'
+spawnd templates run contributor --param clone_url=https://github.com/acme/app.git --param after=main
+spawnd schedules put nightly --template-id contributor --interval-seconds 86400
+spawnd schedules run-due
+spawnd submit-queue enqueue-template contributor --param clone_url=https://github.com/acme/app.git
+spawnd submit-queue drain --once
+```
+
+External systems can enqueue JSON messages onto the Redis submission stream
+through `POST /submissions` or directly to Redis. `spawnd submit-queue drain
+--poll` consumes those messages, validates them, and creates canonical Postgres
+runs.
+
+Notifications use backend environment configuration, not raw secrets in plans.
+Set `SPAWND_NOTIFICATION_WEBHOOK_URL`; failed, timed-out, cancelled, and
+cost-exceeded runs notify automatically. Completed runs notify when the plan has
+`on_complete: notify`.
+
+See [docs/deployment.md](docs/deployment.md) for container, compose, migration,
+and production environment details.
 
 ## Development
 

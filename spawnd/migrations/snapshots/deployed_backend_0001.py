@@ -33,35 +33,6 @@ projects = Table(
     Column('created_at', DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
-run_templates = Table(
-    'run_templates',
-    metadata,
-    Column('id', String(160), primary_key=True),
-    Column('name', String(240), nullable=False),
-    Column('description', Text),
-    Column('plan_template', Text, nullable=False),
-    Column('source_repo_template', Text),
-    Column('source_ref_template', Text),
-    Column('created_at', DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column('updated_at', DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-
-schedules = Table(
-    'schedules',
-    metadata,
-    Column('id', String(160), primary_key=True),
-    Column('template_id', String(160), ForeignKey('run_templates.id', ondelete='CASCADE'), nullable=False),
-    Column('name', String(240), nullable=False),
-    Column('status', String(40), nullable=False, server_default='active'),
-    Column('interval_seconds', Integer, nullable=False),
-    Column('parameters', json_type, nullable=False),
-    Column('next_run_at', DateTime(timezone=True), nullable=False),
-    Column('last_run_at', DateTime(timezone=True)),
-    Column('last_run_id', String(160)),
-    Column('created_at', DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Column('updated_at', DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()),
-)
-
 runs = Table(
     'runs',
     metadata,
@@ -96,7 +67,6 @@ agents = Table(
     Column('type', String(40), nullable=False, server_default='worker'),
     Column('runtime', String(40), nullable=False),
     Column('model', String(120)),
-    Column('write_allowed', Boolean, nullable=False, server_default='true'),
     Column('prompt_hash', String(64), nullable=False),
     Column('prompt_preview', Text),
     Column('check_command_hash', String(64)),
@@ -670,7 +640,6 @@ queue_outbox = Table(
 )
 
 Index('idx_agents_run_status', agents.c.run_id, agents.c.status)
-Index('idx_schedules_status_next_run', schedules.c.status, schedules.c.next_run_at)
 Index('idx_agents_worker_lease', agents.c.worker_id, agents.c.leased_until)
 Index('idx_events_run_agent', events.c.run_id, events.c.agent)
 Index('idx_events_run_type', events.c.run_id, events.c.event_type)

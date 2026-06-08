@@ -31,7 +31,7 @@ def build_manager_system_prompt(config: AgentConfig) -> str:
 
 async def run_worker(config: AgentConfig) -> dict:
     """Run a worker agent on its configured runtime."""
-    toolset = worker_toolset(system_prompt=build_system_prompt(config))
+    toolset = worker_toolset(system_prompt=build_system_prompt(config), write_allowed=config.write_allowed)
     return await _get_executor(config.runtime).run(config, toolset)
 
 async def run_manager(config: AgentConfig) -> dict:

@@ -1,7 +1,7 @@
 """Tests for git module - worktree operations."""
 import subprocess
 import pytest
-from spawnd.gitops.worktrees import create_worktree, get_current_branch, merge_branch, remove_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
+from spawnd.gitops.worktrees import create_worktree, get_current_branch, merge_branch, push_branch, remove_worktree, run_git, run_worktree_setup, setup_worktree_with_deps
 
 @pytest.fixture
 def git_repo(tmp_path):
@@ -82,6 +82,28 @@ def test_run_git_command(git_repo):
     result = run_git(['status'], cwd=git_repo)
     assert result.returncode == 0
     assert 'nothing to commit' in result.stdout or 'clean' in result.stdout
+
+def test_push_branch_pushes_current_head_to_remote(git_repo, tmp_path, monkeypatch):
+    """push_branch publishes the worktree branch ref to the configured remote."""
+    remote = tmp_path / 'remote.git'
+    _ = subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
+    _ = subprocess.run(['git', 'remote', 'add', 'origin', str(remote)], cwd=git_repo, check=True, capture_output=True)
+    _ = monkeypatch.chdir(git_repo)
+    worktree_path = create_worktree('test-run-push', 'agent1', git_repo)
+    _ = (worktree_path / 'pushed.txt').write_text('pushed')
+    _ = subprocess.run(['git', 'add', '.'], cwd=worktree_path, check=True, capture_output=True)
+    _ = subprocess.run(['git', 'commit', '-m', 'Add pushed file'], cwd=worktree_path, check=True, capture_output=True)
+
+    push_branch(worktree_path, 'spawnd/test-run-push/agent1', remote='origin', timeout_seconds=30)
+
+    refs = subprocess.run(
+        ['git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads/spawnd/test-run-push/agent1'],
+        cwd=remote,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert refs.stdout.strip() == 'spawnd/test-run-push/agent1'
 
 def test_cleanup_run_worktrees_does_not_touch_prefix_sibling(git_repo, monkeypatch):
     """cleanup_run_worktrees must not remove worktrees from a run whose id

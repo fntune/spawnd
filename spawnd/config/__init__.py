@@ -42,6 +42,10 @@ class BackendConfig:
 
     database_url: str | None
     redis_url: str | None
+    api_token: str | None
+    github_webhook_secret: str | None
+    notification_webhook_url: str | None
+    notification_timeout_seconds: float
     artifacts: ArtifactStorageConfig
     telemetry: ResolvedTelemetryConfig
 
@@ -98,6 +102,10 @@ def load_backend_config(plan_telemetry: TelemetryConfig | None = None) -> Backen
     return BackendConfig(
         database_url=os.environ.get('SPAWND_DATABASE_URL'),
         redis_url=os.environ.get('SPAWND_REDIS_URL'),
+        api_token=os.environ.get('SPAWND_API_TOKEN'),
+        github_webhook_secret=os.environ.get('SPAWND_GITHUB_WEBHOOK_SECRET'),
+        notification_webhook_url=os.environ.get('SPAWND_NOTIFICATION_WEBHOOK_URL'),
+        notification_timeout_seconds=float(os.environ.get('SPAWND_NOTIFICATION_TIMEOUT_SECONDS', '10')),
         artifacts=ArtifactStorageConfig(
             bucket=os.environ.get('SPAWND_ARTIFACTS_BUCKET'),
             endpoint=os.environ.get('SPAWND_ARTIFACTS_ENDPOINT'),

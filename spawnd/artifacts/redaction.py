@@ -15,6 +15,21 @@ ASSIGNMENT = re.compile(
     r"(?P<key>[A-Z0-9_]+)\s*=\s*(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s]+)",
     re.IGNORECASE,
 )
+BEARER_TOKEN = re.compile(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}')
+BARE_SECRET = re.compile(
+    r'\b('
+    r'sk-[A-Za-z0-9_-]{16,}|'
+    r'gh[pousr]_[A-Za-z0-9_]{16,}|'
+    r'xox[baprs]-[A-Za-z0-9-]{20,}|'
+    r'AKIA[0-9A-Z]{16}'
+    r')\b'
+)
+URL_CREDENTIALS = re.compile(r'(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<userinfo>[^/@\s]+@)')
+JSON_SECRET_FIELD = re.compile(
+    r'(?P<prefix>["\']?(?:token|secret|password|passwd|pwd|credential|auth|api[_-]?key|private[_-]?key)["\']?\s*:\s*)'
+    r'(?P<quote>["\'])(?P<value>[^"\']*)(?P=quote)',
+    re.IGNORECASE,
+)
 
 
 def stable_hash(value: str | bytes) -> str:
@@ -40,6 +55,10 @@ def redact_freeform_text(value: str, *, limit: int = 20000) -> str:
         else match.group(0),
         value,
     )
+    redacted = JSON_SECRET_FIELD.sub(lambda match: f"{match.group('prefix')}{match.group('quote')}<redacted>{match.group('quote')}", redacted)
+    redacted = BEARER_TOKEN.sub('Bearer <redacted>', redacted)
+    redacted = URL_CREDENTIALS.sub(lambda match: f"{match.group('scheme')}<redacted>@", redacted)
+    redacted = BARE_SECRET.sub('<redacted>', redacted)
     if len(redacted) <= limit:
         return redacted
     return redacted[:limit] + f'\n[truncated {len(redacted) - limit} chars]'

@@ -13,6 +13,7 @@ import click
 from spawnd.artifacts.store import InMemoryArtifactStore, S3ArtifactStore
 from spawnd.config import load_backend_config
 from spawnd.coordination.redis import RedisCoordinator
+from spawnd.gitops.worktrees import push_branch
 from spawnd.io.parser import generate_run_id, parse_plan_file
 from spawnd.io.plan_builder import create_inline_plan
 from spawnd.io.validation import validate_plan
@@ -20,8 +21,8 @@ from spawnd.models.specs import Defaults, PlanSpec
 from spawnd.observability.telemetry import TelemetryRecorder
 from spawnd.roles import BUILTIN_ROLES, get_role
 from spawnd.state.repository import DeployedRepository
-from spawnd.state.submission import submit_plan, worker_id as make_worker_id
-from spawnd.workers.worker import DeployedWorker, reconcile_ready_agents
+from spawnd.state.submission import consume_next_submission, enqueue_submission, submit_due_schedules, submit_plan, submit_template, worker_id as make_worker_id
+from spawnd.workers.worker import DeployedWorker, drain_queue_outbox, reconcile_ready_agents
 
 
 def _config():
@@ -108,6 +109,16 @@ def _submit(
 
 def _json_echo(value: Any) -> None:
     click.echo(json.dumps(value, indent=2, default=str))
+
+
+def _parse_params(params: tuple[str, ...]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in params:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            raise click.UsageError(f"Invalid --param value: {item}. Use key=value")
+        parsed[key] = value
+    return parsed
 
 
 @click.group()
@@ -229,6 +240,17 @@ def reconcile(create_schema: bool) -> None:
         click.echo(f"  {item['run_id']}/{item['agent']}")
 
 
+@main.command("drain-outbox")
+@click.option("--limit", type=int, default=100, show_default=True)
+def drain_outbox(limit: int) -> None:
+    """Publish pending queue outbox rows to Redis."""
+
+    published = drain_queue_outbox(_repository(), _coordinator(), limit=limit)
+    click.echo(f"Published outbox rows: {len(published)}")
+    for item in published:
+        click.echo(f"  {item['run_id']}/{item['agent']}")
+
+
 @main.command("worker-heartbeat")
 @click.option("--worker-id", "worker_id_value", default=None, help="Stable worker id")
 @click.option("--create-schema", is_flag=True, help="Create deployed schema first")
@@ -240,6 +262,28 @@ def worker_heartbeat(worker_id_value: str | None, create_schema: bool) -> None:
     repo.record_worker_heartbeat(worker_id_value)
     _coordinator().heartbeat(worker_id_value)
     click.echo(f"Heartbeat recorded: {worker_id_value}")
+
+
+@main.command("workers")
+@click.option("--json", "as_json", is_flag=True)
+def workers(as_json: bool) -> None:
+    """Show deployed worker and queue visibility."""
+
+    repo = _repository()
+    coordinator = _coordinator()
+    payload = {
+        "queue_depth": coordinator.queue_depth(),
+        "submission_queue_depth": coordinator.submission_queue_depth(),
+        "workers": repo.list_worker_nodes(),
+    }
+    if as_json:
+        _json_echo(payload)
+        return
+    click.echo(f"Queue depth: {payload['queue_depth']}")
+    click.echo(f"Submission queue depth: {payload['submission_queue_depth']}")
+    for worker in payload["workers"]:
+        stale = " stale" if worker.get("stale") else ""
+        click.echo(f"  {worker['worker_id']}: {worker.get('status')}{stale} {worker.get('hostname') or ''}")
 
 
 @main.command()
@@ -302,18 +346,27 @@ def events(run_id: str, agent_name: str | None, as_json: bool, limit: int) -> No
 @click.argument("run_id")
 @click.option("--interval", type=float, default=2.0, show_default=True)
 def live_events(run_id: str, interval: float) -> None:
-    """Poll deployed events as a simple live status view."""
+    """Stream deployed events from Redis with Postgres replay."""
 
     repo = _repository()
     seen: set[str] = set()
-    while True:
-        for row in reversed(repo.get_events(run_id, limit=100)):
-            event_id = str(row["id"])
-            if event_id in seen:
-                continue
-            seen.add(event_id)
-            click.echo(f"{row.get('created_at')} {row['agent']} {row['event_type']}")
-        time.sleep(interval)
+    for row in reversed(repo.get_events(run_id, limit=100)):
+        event_id = str(row["id"])
+        seen.add(event_id)
+        click.echo(f"{row.get('created_at')} {row['agent']} {row['event_type']}")
+    try:
+        for event in _coordinator().subscribe_events(run_id):
+            click.echo(json.dumps(event, default=str, sort_keys=True))
+    except Exception as exc:
+        click.echo(f"Redis live stream unavailable, falling back to Postgres polling: {exc}", err=True)
+        while True:
+            for row in reversed(repo.get_events(run_id, limit=100)):
+                event_id = str(row["id"])
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                click.echo(f"{row.get('created_at')} {row['agent']} {row['event_type']}")
+            time.sleep(interval)
 
 
 @main.command()
@@ -419,6 +472,192 @@ def resume(run_id: str) -> None:
         click.echo(f"  {item['agent']}: {item['status']}")
 
 
+@main.group()
+def templates() -> None:
+    """Manage reusable run templates."""
+
+
+@templates.command("put")
+@click.argument("template_id")
+@click.option("--name", default=None)
+@click.option("--description", default=None)
+@click.option("-f", "--file", "plan_template_file", type=click.Path(exists=True), required=True)
+@click.option("--source-repo-template", default=None)
+@click.option("--source-ref-template", default=None)
+def template_put(
+    template_id: str,
+    name: str | None,
+    description: str | None,
+    plan_template_file: str,
+    source_repo_template: str | None,
+    source_ref_template: str | None,
+) -> None:
+    """Create or update a reusable plan template."""
+
+    plan_template = Path(plan_template_file).read_text()
+    _repository().create_run_template(
+        template_id,
+        name=name or template_id,
+        description=description,
+        plan_template=plan_template,
+        source_repo_template=source_repo_template,
+        source_ref_template=source_ref_template,
+    )
+    click.echo(f"Template saved: {template_id}")
+
+
+@templates.command("list")
+@click.option("--json", "as_json", is_flag=True)
+def template_list(as_json: bool) -> None:
+    """List reusable run templates."""
+
+    rows = _repository().list_run_templates()
+    if as_json:
+        _json_echo(rows)
+        return
+    for row in rows:
+        click.echo(f"{row['id']}: {row['name']}")
+
+
+@templates.command("run")
+@click.argument("template_id")
+@click.option("--param", "params", multiple=True, help="Template parameter as key=value")
+@click.option("--run-id", default=None)
+def template_run(template_id: str, params: tuple[str, ...], run_id: str | None) -> None:
+    """Render and submit a reusable run template."""
+
+    actual_run_id = submit_template(
+        template_id,
+        parameters=_parse_params(params),
+        repository=_repository(),
+        coordinator=_coordinator(),
+        run_id=run_id,
+    )
+    click.echo(f"Submitted run: {actual_run_id}")
+
+
+@main.group()
+def schedules() -> None:
+    """Manage recurring schedule definitions."""
+
+
+@schedules.command("put")
+@click.argument("schedule_id")
+@click.option("--template-id", required=True)
+@click.option("--name", default=None)
+@click.option("--interval-seconds", type=int, required=True)
+@click.option("--param", "params", multiple=True, help="Template parameter as key=value")
+def schedule_put(schedule_id: str, template_id: str, name: str | None, interval_seconds: int, params: tuple[str, ...]) -> None:
+    """Create or update a recurring schedule."""
+
+    _repository().create_schedule(
+        schedule_id,
+        template_id=template_id,
+        name=name or schedule_id,
+        interval_seconds=interval_seconds,
+        parameters=_parse_params(params),
+    )
+    click.echo(f"Schedule saved: {schedule_id}")
+
+
+@schedules.command("run-due")
+@click.option("--limit", type=int, default=100, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+def schedules_run_due(limit: int, as_json: bool) -> None:
+    """Submit runs for due recurring schedules."""
+
+    submitted = submit_due_schedules(repository=_repository(), coordinator=_coordinator(), limit=limit)
+    if as_json:
+        _json_echo(submitted)
+        return
+    click.echo(f"Schedules submitted: {len(submitted)}")
+    for item in submitted:
+        click.echo(f"  {item['schedule_id']} -> {item['run_id']}")
+
+
+@main.group("submit-queue")
+def submit_queue() -> None:
+    """Manage queued run submission ingress."""
+
+
+@submit_queue.command("enqueue-template")
+@click.argument("template_id")
+@click.option("--param", "params", multiple=True, help="Template parameter as key=value")
+@click.option("--run-id", default=None)
+def submit_queue_enqueue_template(template_id: str, params: tuple[str, ...], run_id: str | None) -> None:
+    """Enqueue a template run request for asynchronous submission."""
+
+    payload = {
+        "kind": "template",
+        "template_id": template_id,
+        "parameters": _parse_params(params),
+    }
+    if run_id:
+        payload["run_id"] = run_id
+    enqueue_submission(_coordinator(), payload)
+    click.echo(f"Queued template submission: {template_id}")
+
+
+@submit_queue.command("enqueue-plan")
+@click.option("-f", "--file", "plan_file", type=click.Path(exists=True), required=True)
+@click.option("--run-id", default=None)
+@click.option("--source-repo", default=None)
+@click.option("--source-ref", default=None)
+def submit_queue_enqueue_plan(plan_file: str, run_id: str | None, source_repo: str | None, source_ref: str | None) -> None:
+    """Enqueue a serialized plan request for asynchronous submission."""
+
+    plan = parse_plan_file(Path(plan_file))
+    payload: dict[str, Any] = {"kind": "plan", "plan": plan.model_dump(mode="json")}
+    if run_id:
+        payload["run_id"] = run_id
+    if source_repo:
+        payload["source_repo"] = source_repo
+    if source_ref:
+        payload["source_ref"] = source_ref
+    enqueue_submission(_coordinator(), payload)
+    click.echo(f"Queued plan submission: {plan.name}")
+
+
+@submit_queue.command("drain")
+@click.option("--once", "run_once_flag", is_flag=True, help="Consume at most one submission")
+@click.option("--poll", "run_poll_flag", is_flag=True, help="Continuously consume submissions")
+@click.option("--consumer-id", default=None)
+@click.option("--block-ms", type=int, default=1000, show_default=True)
+@click.option("--idle-sleep-seconds", type=float, default=1.0, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+def submit_queue_drain(
+    run_once_flag: bool,
+    run_poll_flag: bool,
+    consumer_id: str | None,
+    block_ms: int,
+    idle_sleep_seconds: float,
+    as_json: bool,
+) -> None:
+    """Create runs from queued submission messages."""
+
+    if run_once_flag == run_poll_flag:
+        raise click.UsageError("Choose exactly one of --once or --poll")
+    consumer_id = consumer_id or make_worker_id("submitter")
+    repo = _repository()
+    coordinator = _coordinator()
+    if run_once_flag:
+        result = consume_next_submission(repository=repo, coordinator=coordinator, consumer_id=consumer_id, block_ms=block_ms)
+        if as_json:
+            _json_echo(result or {"status": "empty"})
+            return
+        click.echo("No queued submissions" if result is None else json.dumps(result, default=str))
+        return
+    while True:
+        result = consume_next_submission(repository=repo, coordinator=coordinator, consumer_id=consumer_id, block_ms=block_ms)
+        if result is None:
+            time.sleep(idle_sleep_seconds)
+            continue
+        if as_json:
+            _json_echo(result)
+        else:
+            click.echo(json.dumps(result, default=str))
+
+
 @main.command()
 @click.argument("run_id")
 @click.option("-a", "--agent", "agent_name", help="Specific agent name")
@@ -445,7 +684,10 @@ def pr() -> None:
 @click.option("-a", "--agent", "agent_name", help="Specific agent name")
 @click.option("--all", "all_agents", is_flag=True, help="Create PRs for all provenance rows")
 @click.option("--title-prefix", default="spawnd", show_default=True)
-def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefix: str) -> None:
+@click.option("--remote", default="origin", show_default=True)
+@click.option("--timeout-seconds", type=int, default=60, show_default=True)
+@click.option("--no-push", is_flag=True, help="Skip pushing the recorded branch before PR creation")
+def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefix: str, remote: str, timeout_seconds: int, no_push: bool) -> None:
     """Create GitHub PRs from recorded branch provenance."""
 
     if not agent_name and not all_agents:
@@ -456,18 +698,65 @@ def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefi
         if not branch:
             click.echo(f"Skipping {row.get('agent')}: no branch recorded", err=True)
             continue
+        branch_name = str(branch)
+        worktree_locator = row.get("worktree_locator")
+        if not no_push:
+            push_path = Path(str(worktree_locator)) if worktree_locator else None
+            if push_path is None or not push_path.exists():
+                diff_stats = row.get("diff_stats") if isinstance(row.get("diff_stats"), dict) else {}
+                source_repo = diff_stats.get("source_repo")
+                push_path = Path(str(source_repo)) if source_repo else None
+            if push_path is None or not push_path.exists():
+                raise click.UsageError(f"Cannot push {row.get('agent')}: no worktree or source repository recorded")
+            push_branch(push_path, branch_name, remote=remote, timeout_seconds=timeout_seconds)
         agent_label = row.get("agent") or "run"
         title = f"{title_prefix}: {run_id}/{agent_label}"
         body = json.dumps({"run_id": run_id, "agent": agent_label, "provenance": row}, indent=2, default=str)
         result = subprocess.run(
-            ["gh", "pr", "create", "--head", branch, "--title", title, "--body", body],
+            ["gh", "pr", "create", "--head", branch_name, "--title", title, "--body", body],
             capture_output=True,
             text=True,
+            timeout=timeout_seconds,
         )
         if result.returncode != 0:
             click.echo(result.stderr.strip() or result.stdout.strip(), err=True)
             raise click.Abort()
         click.echo(result.stdout.strip())
+
+
+@pr.command("merge")
+@click.argument("run_id")
+@click.option("-a", "--agent", "agent_name", help="Specific agent name")
+@click.option("--all", "all_agents", is_flag=True, help="Merge PRs for all provenance rows")
+@click.option("--method", type=click.Choice(["merge", "squash", "rebase"]), default="squash", show_default=True)
+@click.option("--delete-branch", is_flag=True, help="Delete remote branch after merge")
+@click.option("--timeout-seconds", type=int, default=60, show_default=True)
+def pr_merge(run_id: str, agent_name: str | None, all_agents: bool, method: str, delete_branch: bool, timeout_seconds: int) -> None:
+    """Merge GitHub PRs recorded in run provenance."""
+
+    if not agent_name and not all_agents:
+        raise click.UsageError("Pass --agent or --all")
+    rows = _repository().get_git_provenance(run_id, agent_name)
+    repo = _repository()
+    for row in rows:
+        pr_target = row.get("pr_url") or row.get("pr_number")
+        if not pr_target:
+            click.echo(f"Skipping {row.get('agent')}: no PR recorded", err=True)
+            continue
+        args = ["gh", "pr", "merge", str(pr_target), f"--{method}"]
+        if delete_branch:
+            args.append("--delete-branch")
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout_seconds)
+        if result.returncode != 0:
+            click.echo(result.stderr.strip() or result.stdout.strip(), err=True)
+            raise click.Abort()
+        repo.append_event(
+            run_id,
+            str(row.get("agent") or "_system"),
+            "pr_merged",
+            {"pr": str(pr_target), "method": method, "delete_branch": delete_branch},
+        )
+        click.echo(result.stdout.strip() or f"Merged {pr_target}")
 
 
 @main.command()

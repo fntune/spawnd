@@ -8,7 +8,7 @@ difference.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-DEFAULT_CODE_TOOLS: list[str] = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
+DEFAULT_CODE_TOOLS: list[str] = ['Read', 'Write', 'Edit', 'Glob', 'Grep']
 READONLY_CODE_TOOLS: list[str] = ['Read', 'Glob', 'Grep']
 WORKER_COORD_OPS: list[str] = ['mark_complete', 'request_clarification', 'report_progress', 'report_blocker']
 MANAGER_COORD_OPS: list[str] = ['spawn_worker', 'respond_to_clarification', 'cancel_worker', 'get_worker_status', 'get_pending_clarifications', 'mark_plan_complete']

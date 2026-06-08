@@ -21,11 +21,23 @@ def get_worktrees_dir(run_id: str, repo_path: Path | None = None) -> Path:
     root = Path(os.environ.get('SPAWND_SCRATCH_ROOT', str(repo / '.spawnd-scratch')))
     return root / 'worktrees' / run_id
 
-def run_git(args: list[str], cwd: Path | None=None, check: bool=True) -> subprocess.CompletedProcess:
+def run_git(
+    args: list[str],
+    cwd: Path | None=None,
+    check: bool=True,
+    timeout: int | None=None,
+    env: dict[str, str] | None=None,
+) -> subprocess.CompletedProcess:
     """Run a git command."""
     cmd = ['git'] + args
     _ = logger.debug(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    git_env = os.environ.copy()
+    if env:
+        _ = git_env.update(env)
+    try:
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=git_env)
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"Git command timed out after {timeout}s: {' '.join(cmd)}") from exc
     if check and result.returncode != 0:
         raise GitError(f'Git command failed: {result.stderr}')
     return result
@@ -51,7 +63,14 @@ def get_current_branch(cwd: Path | None=None) -> str:
     result = run_git(['branch', '--show-current'], cwd=cwd)
     return result.stdout.strip()
 
-def create_worktree(run_id: str, agent_name: str, repo_path: Path | None=None, base_ref: str | None=None, fetch: bool=False) -> Path:
+def create_worktree(
+    run_id: str,
+    agent_name: str,
+    repo_path: Path | None=None,
+    base_ref: str | None=None,
+    fetch: bool=False,
+    env: dict[str, str] | None=None,
+) -> Path:
     """Create a git worktree for an agent.
 
     If worktree already exists (resume scenario), returns existing path.
@@ -72,11 +91,11 @@ def create_worktree(run_id: str, agent_name: str, repo_path: Path | None=None, b
         return worktree_path
     _ = worktree_path.parent.mkdir(parents=True, exist_ok=True)
     if fetch:
-        _ = run_git(['fetch', '--prune', 'origin'], cwd=repo)
+        _ = run_git(['fetch', '--prune', 'origin'], cwd=repo, env=env)
     args = ['worktree', 'add', '-b', branch_name, str(worktree_path)]
     if base_ref:
         _ = args.append(base_ref)
-    _ = run_git(args, cwd=repo)
+    _ = run_git(args, cwd=repo, env=env)
     _ = logger.info(f'Created worktree at {worktree_path} on branch {branch_name}')
     return worktree_path
 
@@ -199,6 +218,19 @@ def commit(worktree_path: Path, message: str) -> None:
         _ = logger.info(f'Committed in {worktree_path}: {message}')
     else:
         _ = logger.debug('Nothing to commit')
+
+def push_branch(
+    worktree_path: Path,
+    branch: str,
+    *,
+    remote: str='origin',
+    timeout_seconds: int | None=60,
+    env: dict[str, str] | None=None,
+) -> None:
+    """Push the current worktree HEAD to its remote branch."""
+
+    _ = run_git(['push', '-u', remote, f'HEAD:{branch}'], cwd=worktree_path, timeout=timeout_seconds, env=env)
+    _ = logger.info(f'Pushed {branch} to {remote}')
 
 def _apply_dependency_change(worktree_path: Path, dep_branch: str, change: dict[str, str | None]) -> tuple[bool, str | None]:
     """Apply one dependency diff entry into the target worktree."""

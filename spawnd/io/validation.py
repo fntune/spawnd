@@ -42,4 +42,24 @@ def validate_plan(plan: PlanSpec) -> list[str]:
     for agent in plan.agents:
         if agent.use_role and get_role(agent.use_role) is None:
             _ = errors.append(f'Agent {agent.name} uses unknown role: {agent.use_role}')
+        mcp_servers = [*plan.defaults.mcp_servers, *agent.mcp_servers]
+        runtime = agent.runtime or plan.defaults.runtime
+        for server in mcp_servers:
+            if server.name == 'spawnd':
+                _ = errors.append(f'Agent {agent.name} MCP server name spawnd is reserved')
+            if server.type == 'stdio' and not server.command:
+                _ = errors.append(f'Agent {agent.name} MCP server {server.name} requires command')
+            if server.type in {'http', 'sse'} and not server.url:
+                _ = errors.append(f'Agent {agent.name} MCP server {server.name} requires url')
+            if runtime == 'codex':
+                if server.type == 'sse':
+                    _ = errors.append(f'Agent {agent.name} runtime codex does not support SSE MCP server {server.name}')
+                if server.type == 'http':
+                    if server.headers:
+                        _ = errors.append(f'Agent {agent.name} runtime codex MCP server {server.name} does not support literal headers')
+                    unsupported_refs = set(server.header_refs) - {'Authorization'}
+                    if unsupported_refs:
+                        _ = errors.append(
+                            f"Agent {agent.name} runtime codex MCP server {server.name} only supports Authorization header_refs"
+                        )
     return errors

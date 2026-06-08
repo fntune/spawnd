@@ -20,8 +20,8 @@ This repository now targets one deployed execution model.
 Durable run evidence is:
 
 - Postgres rows for state transitions and queryable provenance;
-- submitted `source_repo` and `source_ref` fields that identify the worker-local
-  git source path and default worktree base ref;
+- submitted `source_repo` and `source_ref` fields that identify a local git
+  source path or remote URL plus the default worktree base ref;
 - object-store artifacts for large redacted payloads;
 - git provenance rows and patch artifacts for code changes;
 - trace rows plus optional OTLP export for observability.
@@ -30,8 +30,8 @@ Worker worktrees remain execution scratch and are not durable evidence.
 
 ## Current Execution Contract
 
-- `source_repo` is a local git repository path reachable by the worker. It is
-  validated before worktree creation and is not cloned from a remote URL.
+- `source_repo` is a local git repository path or remote URL. Remote URLs are
+  cloned/fetched into the worker source cache before worktree creation.
 - `source_ref` is the submitted default base ref. A plan-level
   `orchestration.worktree_source.base_ref` overrides it.
 - `--source-path` on the worker is a fallback source for runs without
@@ -56,12 +56,10 @@ Worker worktrees remain execution scratch and are not durable evidence.
 - Reconciliation records queue outbox rows before publishing Redis wakeups.
 - Tests that exercise state transitions use `SPAWND_TEST_DATABASE_URL`.
 
-## Remaining Operational Gaps
+## Operational Capabilities Added After Migration
 
-- Remote clone/fetch and scoped git credentials are not implemented. Worker
-  hosts must already have the submitted repositories and refs available.
-- Completed agent branches are recorded as provenance and patch artifacts but
-  are not pushed automatically.
-- Runtime wall-clock deadlines, retryable provider error classification,
-  deployment manifests, API auth, and worktree cleanup are still separate
-  unattended-operation work.
+- Remote clone/fetch and git push can receive explicit worker-side secret refs.
+- Completed agent branches can be committed and pushed from worker policy.
+- Runtime and check wall-clock deadlines, retryable provider error
+  classification, API auth, deployment manifests, notifications, command
+  policy, and opt-in worktree cleanup are wired into the deployed path.

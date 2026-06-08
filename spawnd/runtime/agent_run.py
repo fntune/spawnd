@@ -2,6 +2,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from spawnd.models.specs import CodexRuntimeConfig, McpServerSpec
 from spawnd.runtime.observer import NullRuntimeObserver, RuntimeObserver
 
 @dataclass
@@ -14,11 +15,18 @@ class AgentConfig:
     check_command: str = 'true'
     model: str | None = 'sonnet'
     max_iterations: int = 30
+    runtime_timeout_seconds: int | None = None
+    check_timeout_seconds: int | None = 300
     max_cost_usd: float = 5.0
     parent: str | None = None
     env: dict[str, str] | None = None
     shared_context: str = ''
     runtime: str = 'claude'
+    write_allowed: bool = True
+    codex: CodexRuntimeConfig | None = None
+    mcp_servers: list[McpServerSpec] | None = None
+    resume_session_id: str | None = None
+    resume_thread_id: str | None = None
     observer: RuntimeObserver = NullRuntimeObserver()
 
     def tree_path(self) -> str:

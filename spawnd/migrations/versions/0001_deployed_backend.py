@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from alembic import op
 
-from spawnd.state.schema import metadata
+from spawnd.migrations.snapshots.deployed_backend_0001 import metadata
 
 revision = '0001_deployed_backend'
 down_revision = None
