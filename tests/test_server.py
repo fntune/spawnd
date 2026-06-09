@@ -215,7 +215,7 @@ def test_github_webhook_requires_valid_signature_and_submits_template(monkeypatc
 name: "github-{event}"
 agents:
   - name: contributor
-    prompt: "Review {repo} at {after}"
+    prompt: "Review {repo} ({repo_slug}) at {after}; pr {pr_number}; head {head_ref} {head_sha}; base {base_ref} {base_sha}"
 """
     client.post(
         '/templates',

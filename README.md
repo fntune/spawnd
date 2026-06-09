@@ -131,9 +131,18 @@ Git clone/fetch/push credentials should be provided through explicit
 `env_refs` on `orchestration.worktree_source` or `orchestration.git`. The plan
 stores only the reference names; workers resolve actual secret values from their
 environment at runtime.
-The compose worker exposes `SPAWND_GITHUB_TOKEN` and
-`SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` for this purpose, and
-can mount Codex auth from `SPAWND_CODEX_AUTH_DIR` into `/root/.codex`.
+The container worker loads `SPAWND_GITHUB_TOKEN` from the ignored `.env` and uses
+`SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` for this purpose. It
+mounts Codex auth from the required `SPAWND_CODEX_AUTH_DIR` value into
+`/root/.codex`.
+
+On Podman hosts such as `micro-1`, start the deployed stack with:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+deploy/podman/up.sh
+```
 
 Plan-provided setup and check commands are constrained by
 `orchestration.command_policy`. The default allowlist permits common test and
@@ -390,13 +399,39 @@ spawnd github-webhooks verify \
 Reusable templates and schedules are durable Postgres records:
 
 ```bash
-spawnd templates put contributor -f contributor-template.yaml \
+spawnd templates put contributor -f deploy/templates/contributor.yaml \
   --source-repo-template '{clone_url}' \
   --source-ref-template '{after}'
-spawnd templates run contributor --param clone_url=https://github.com/acme/app.git --param after=main
+spawnd templates run contributor \
+  --param clone_url=https://github.com/acme/app.git \
+  --param after=main \
+  --param repo=acme/app \
+  --param repo_slug=acme-app \
+  --param event=manual \
+  --param action= \
+  --param ref=main \
+  --param before= \
+  --param pr_number= \
+  --param head_ref= \
+  --param head_sha= \
+  --param base_ref= \
+  --param base_sha=
 spawnd schedules put nightly --template-id contributor --interval-seconds 86400
 spawnd schedules run-due --poll --idle-sleep-seconds 60
-spawnd submit-queue enqueue-template contributor --param clone_url=https://github.com/acme/app.git
+spawnd submit-queue enqueue-template contributor \
+  --param clone_url=https://github.com/acme/app.git \
+  --param after=main \
+  --param repo=acme/app \
+  --param repo_slug=acme-app \
+  --param event=manual \
+  --param action= \
+  --param ref=main \
+  --param before= \
+  --param pr_number= \
+  --param head_ref= \
+  --param head_sha= \
+  --param base_ref= \
+  --param base_sha=
 spawnd submit-queue drain --once
 ```
 
@@ -414,7 +449,13 @@ Set `SPAWND_NOTIFICATION_WEBHOOK_URL`; failed, timed-out, cancelled, and
 cost-exceeded runs notify automatically. Completed runs notify when the plan has
 `on_complete: notify`.
 
-See [docs/deployment.md](docs/deployment.md) for container, compose, migration,
+The repository includes a reusable unattended contributor template at
+`deploy/templates/contributor.yaml`. It is intentionally conservative: Codex
+runs inside the worker container boundary, the durable worker check is
+`git diff --check`, raw artifacts are disabled, git push uses secret references,
+and recurring schedules should be created paused until intentionally activated.
+
+See [docs/deployment.md](docs/deployment.md) for Podman, compose, migration,
 and production environment details.
 
 ## Development

@@ -1,10 +1,10 @@
 # Deployed Proof Run - 2026-06-09
 
-This runbook records the deployed Spawnd proof performed against the local Docker
-stack on 2026-06-09. The stack used real Postgres, Redis, and MinIO. It includes
-both an initial mock runtime proof and a later real Codex-backed contributor run.
-The full unattended goal is still not complete because real GitHub webhook
-installation requires a durable public API callback URL.
+This runbook records the deployed Spawnd proof performed on 2026-06-09. The
+initial proof used a local Docker Compose stack; the `micro-1` continuation uses
+Podman with real Postgres, Redis, MinIO, and Tailscale Funnel ingress. It
+includes both an initial mock runtime proof and a later real Codex-backed
+contributor run.
 
 ## Environment
 
@@ -55,14 +55,15 @@ mounted into `/root/.codex` and a one-off `GH_TOKEN` injected from `gh auth
 token`. That proves the runtime and PR path, but it is not persistent unattended
 secret wiring.
 
-Follow-up persistent wiring added after the proof:
+Follow-up persistent wiring added after the proof and then corrected for the
+Podman host path:
 
-- `docker/git-askpass.sh` is a committed non-secret helper for git HTTPS auth.
+- `deploy/container/git-askpass.sh` is a committed non-secret helper for git
+  HTTPS auth.
 - the worker image includes `gh` plus `/usr/local/bin/spawnd-git-askpass`.
-- compose worker env exposes `SPAWND_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`,
-  `SPAWND_GIT_ASKPASS`, and `GIT_ASKPASS`.
-- compose worker mounts `${SPAWND_CODEX_AUTH_DIR:-${HOME}/.codex}` into
-  `/root/.codex:ro`.
+- worker env loads `SPAWND_GITHUB_TOKEN` from ignored `.env` and exposes it to
+  git only through `SPAWND_GIT_ASKPASS`/`GIT_ASKPASS`.
+- worker mounts the required `SPAWND_CODEX_AUTH_DIR` into `/root/.codex:ro`.
 - `.env.example` documents the local secret names while `.env` remains ignored.
 
 Persistent wiring verification after recreating the worker from `.env`:
@@ -70,8 +71,8 @@ Persistent wiring verification after recreating the worker from `.env`:
 ```bash
 umask 077
 # write SPAWND_CODEX_AUTH_DIR and SPAWND_GITHUB_TOKEN into ignored .env
-docker compose up -d --force-recreate worker
-docker compose exec -T worker sh -lc '
+deploy/podman/up.sh
+podman exec -T spawnd_worker_1 sh -lc '
 test -r /root/.codex/auth.json
 command -v gh
 gh --version | head -1
@@ -79,12 +80,11 @@ command -v spawnd-git-askpass
 test "$SPAWND_GIT_ASKPASS" = /usr/local/bin/spawnd-git-askpass
 test "$GIT_ASKPASS" = /usr/local/bin/spawnd-git-askpass
 test -n "$SPAWND_GITHUB_TOKEN"
-test -n "$GH_TOKEN"
 printf "codex_auth=readable\n"
 printf "github_token=set\n"
 printf "askpass=%s\n" "$SPAWND_GIT_ASKPASS"
 '
-docker compose exec -T worker sh -lc 'gh api user --jq .login'
+podman exec -T spawnd_worker_1 sh -lc 'SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass git ls-remote https://github.com/fntune/spawnd.git HEAD >/dev/null'
 ```
 
 Result:
@@ -96,7 +96,6 @@ gh version 2.46.0 (2025-01-13 Debian 2.46.0-3)
 codex_auth=readable
 github_token=set
 askpass=/usr/local/bin/spawnd-git-askpass
-sour4bh
 ```
 
 ## Infrastructure Commands
@@ -678,7 +677,7 @@ Traces  {"otelcol.component.id":"debug","otelcol.signal":"traces","resource span
 
 ## Worker Runtime Binary Proof
 
-The Dockerfile links the bundled `openai-codex-cli-bin` binary onto the worker
+The container image links the bundled `openai-codex-cli-bin` binary onto the worker
 `PATH` after installing Python dependencies.
 
 Verification from the running worker:
@@ -693,6 +692,166 @@ Result:
 /usr/local/bin/codex
 WARNING: proceeding, even though we could not update PATH: Read-only file system (os error 30)
 codex-cli 0.137.0-alpha.4
+```
+
+## Micro-1 Podman Deployment
+
+The `micro-1` deployment uses Podman, not Docker. Docker and containerd services
+were stopped and verified inactive:
+
+```text
+docker.service: inactive
+docker.socket: inactive
+containerd.service: inactive
+```
+
+The repository now contains the Podman-owned deployment entrypoints:
+
+- `Containerfile`
+- `deploy/container/git-askpass.sh`
+- `deploy/container/otel-collector.yml`
+- `deploy/podman/up.sh`
+- `deploy/podman/down.sh`
+- `deploy/templates/contributor.yaml`
+
+Start command used on `micro-1`:
+
+```bash
+cd /home/ubuntu/spawnd
+deploy/podman/up.sh
+```
+
+The script builds `localhost/spawnd:latest`, creates the Podman network and
+volumes, starts Postgres/Redis/MinIO/OTLP, waits for health, initializes the
+artifact bucket, runs Alembic migrations, then starts API, submitter, scheduler,
+outbox, and worker containers.
+
+Podman service proof:
+
+```text
+spawnd_postgres_1        Up (healthy)  docker.io/library/postgres:16
+spawnd_redis_1           Up (healthy)  docker.io/library/redis:7
+spawnd_otel-collector_1  Up            docker.io/otel/opentelemetry-collector-contrib:0.138.0
+spawnd_minio_1           Up (healthy)  docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+spawnd_api_1             Up            localhost/spawnd:latest
+spawnd_submitter_1       Up            localhost/spawnd:latest
+spawnd_scheduler_1       Up            localhost/spawnd:latest
+spawnd_outbox_1          Up            localhost/spawnd:latest
+spawnd_worker_1          Up            localhost/spawnd:latest
+```
+
+Local readiness:
+
+```text
+/healthz -> {"status":"ok"}
+/readyz  -> {"database_configured":true,"redis_configured":true,"api_auth_configured":true}
+```
+
+Worker credential/runtime proof:
+
+```text
+/usr/local/bin/codex
+codex-cli 0.137.0-alpha.4
+/usr/local/bin/spawnd-git-askpass
+github_token=set
+git_auth=ok
+```
+
+## Tailscale Funnel And GitHub Hooks
+
+Tailscale Funnel on `micro-1` proxies public HTTPS to the Podman API:
+
+```text
+https://micro-1.tail7a6e16.ts.net/ -> http://127.0.0.1:8765
+```
+
+Forced public-edge checks passed for both public Funnel A records:
+
+```text
+https://micro-1.tail7a6e16.ts.net/readyz -> ready
+https://micro-1.tail7a6e16.ts.net/healthz -> ok
+```
+
+Signed GitHub-style webhook pings through the public Funnel edge returned:
+
+```text
+{"status":"pong"}
+{"status":"pong"}
+```
+
+Installed hooks:
+
+```text
+fntune/subport   638561476  https://micro-1.tail7a6e16.ts.net/webhooks/github/github-contributor
+fntune/stockbay  638561485  https://micro-1.tail7a6e16.ts.net/webhooks/github/github-contributor
+fntune/fn        638561496  https://micro-1.tail7a6e16.ts.net/webhooks/github/github-contributor
+fntune/biomon    638561506  https://micro-1.tail7a6e16.ts.net/webhooks/github/github-contributor
+fntune/cashgrep  638561514  https://micro-1.tail7a6e16.ts.net/webhooks/github/github-contributor
+```
+
+Spawnd webhook verification returned `ok: true` for all five hooks. After
+correcting the GitHub CLI path to use `/repos/...`, GitHub hook pings returned
+204 and every hook reported:
+
+```text
+last_response: {"code":200,"message":"OK","status":"active"}
+```
+
+API log evidence shows the signed hook pings reaching the Podman API:
+
+```text
+POST /webhooks/github/github-contributor HTTP/1.1" 200 OK
+POST /webhooks/github/github-contributor HTTP/1.1" 200 OK
+POST /webhooks/github/github-contributor HTTP/1.1" 200 OK
+POST /webhooks/github/github-contributor HTTP/1.1" 200 OK
+POST /webhooks/github/github-contributor HTTP/1.1" 200 OK
+```
+
+## Micro-1 Templates And Schedules
+
+The reusable contributor template is committed at
+`deploy/templates/contributor.yaml` and copied into the image at
+`/app/deploy/templates/contributor.yaml`. On `micro-1`, install:
+
+```bash
+podman exec spawnd_api_1 spawnd templates put github-contributor \
+  -f /app/deploy/templates/contributor.yaml \
+  --source-repo-template '{clone_url}' \
+  --source-ref-template '{after}'
+```
+
+Project-specific templates should use the same file with fixed source repo/ref.
+Recurring schedules should be created paused first so installation does not
+start five Codex jobs unintentionally.
+
+Installed templates:
+
+```text
+github-contributor
+contributor-subport
+contributor-stockbay
+contributor-fn
+contributor-biomon
+contributor-cashgrep
+```
+
+Installed schedules:
+
+```text
+contributor-biomon-nightly    contributor-biomon    paused  fntune-biomon
+contributor-cashgrep-nightly  contributor-cashgrep  paused  fntune-cashgrep
+contributor-fn-nightly        contributor-fn        paused  fntune-fn
+contributor-stockbay-nightly  contributor-stockbay  paused  fntune-stockbay
+contributor-subport-nightly   contributor-subport   paused  fntune-subport
+```
+
+Template rendering was checked with a push-style parameter set:
+
+```text
+name: contributor-fntune-subport
+runtime: codex
+check: git diff --check
+agent: contributor
 ```
 
 ## Verification
@@ -719,7 +878,7 @@ Result: passed.
 
 ## Remaining Work Before Goal Completion
 
-The active unattended goal is not complete. Remaining required proof:
-
-- Install real GitHub webhooks on the intended repositories after a durable
-  public API callback URL is available.
+The durable public callback blocker is closed on `micro-1`: Podman API is
+reachable through Tailscale Funnel and GitHub reports all five hooks active with
+HTTP 200 pings. Remaining operational choices are intentional activation of
+paused recurring schedules and the first real push/PR-triggered contributor run.

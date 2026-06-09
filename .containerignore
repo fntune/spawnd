@@ -1,0 +1,9 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+.spawnd-scratch
+.swarm
+__pycache__
+*.pyc
+.DS_Store

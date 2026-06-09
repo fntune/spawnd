@@ -12,6 +12,10 @@ released.
 
 - Persistent compose worker auth wiring for Codex auth, GitHub tokens, git
   askpass, and the bundled Codex CLI.
+- Podman deployment scripts that start infra, run migrations, and launch API,
+  worker, submitter, scheduler, and outbox processes with explicit ordering.
+- Reusable `deploy/templates/contributor.yaml` for conservative unattended
+  contributor runs across GitHub-triggered and scheduled projects.
 - Local compose OTLP collector with worker OTLP export enabled by default.
 - Schedule activation controls through CLI and HTTP API.
 - `spawnd github-webhooks install` for idempotent GitHub webhook create/update
@@ -36,7 +40,7 @@ Commit: `68c5461 Close unattended readiness audit`
 - Internal Spawnd MCP server for Codex manager/worker coordination tools.
 - HTTP bearer authentication, GitHub webhook signature validation, command
   allowlisting, secret-reference resolution, and runtime isolation policy.
-- Deployment artifacts: `Dockerfile`, `docker-compose.yml`, `.dockerignore`,
+- Deployment artifacts: `Containerfile`, `docker-compose.yml`, `.dockerignore`,
   deployment documentation, health/readiness/metrics endpoints, worker
   visibility, and notification webhook support.
 - Alembic migration snapshot coverage and deployed schema revalidation tests.

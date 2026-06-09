@@ -115,16 +115,23 @@ def _verify_github_signature(secret: str, body: bytes, signature: str | None) ->
 
 def _github_parameters(event: str, payload: dict[str, Any]) -> dict[str, str]:
     repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+    repo = str(repository.get("full_name") or repository.get("name") or "")
     parameters = {
         "event": event,
         "action": str(payload.get("action") or ""),
-        "repo": str(repository.get("full_name") or repository.get("name") or ""),
+        "repo": repo,
+        "repo_slug": repo.replace("/", "-"),
         "clone_url": str(repository.get("clone_url") or ""),
         "ssh_url": str(repository.get("ssh_url") or ""),
         "default_branch": str(repository.get("default_branch") or ""),
         "ref": str(payload.get("ref") or ""),
         "before": str(payload.get("before") or ""),
         "after": str(payload.get("after") or ""),
+        "pr_number": "",
+        "head_ref": "",
+        "head_sha": "",
+        "base_ref": "",
+        "base_sha": "",
     }
     pull_request = payload.get("pull_request")
     if isinstance(pull_request, dict):

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: docker.io/library/postgres:16
     environment:
       POSTGRES_DB: spawnd
       POSTGRES_USER: spawnd
@@ -16,7 +16,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7
+    image: docker.io/library/redis:7
     ports:
       - "63799:6379"
     healthcheck:
@@ -26,17 +26,17 @@ services:
       retries: 20
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.138.0
+    image: docker.io/otel/opentelemetry-collector-contrib:0.138.0
     command: ["--config=/etc/otelcol/config.yml"]
     volumes:
-      - ./docker/otel-collector.yml:/etc/otelcol/config.yml:ro
+      - ./deploy/container/otel-collector.yml:/etc/otelcol/config.yml:ro
     ports:
       - "4317:4317"
       - "4318:4318"
       - "13133:13133"
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: spawnd
@@ -53,7 +53,7 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: docker.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
       minio:
         condition: service_healthy
@@ -64,7 +64,9 @@ services:
       "
 
   migrate:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,7 +75,9 @@ services:
     command: alembic upgrade head
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -97,7 +101,11 @@ services:
     command: spawnd serve --host 0.0.0.0 --port 8765
 
   worker:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
+    env_file:
+      - .env
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -129,18 +137,17 @@ services:
       GIT_TERMINAL_PROMPT: "0"
       SPAWND_GIT_ASKPASS: /usr/local/bin/spawnd-git-askpass
       GIT_ASKPASS: /usr/local/bin/spawnd-git-askpass
-      SPAWND_GITHUB_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
-      GITHUB_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
-      GH_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
       AWS_ACCESS_KEY_ID: spawnd
       AWS_SECRET_ACCESS_KEY: spawnd-secret
     volumes:
       - spawnd-scratch:/scratch
-      - ${SPAWND_CODEX_AUTH_DIR:-${HOME}/.codex}:/root/.codex:ro
+      - ${SPAWND_CODEX_AUTH_DIR:?SPAWND_CODEX_AUTH_DIR is required}:/root/.codex:ro
     command: spawnd worker --poll --worker-id compose-worker-1
 
   submitter:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -152,7 +159,9 @@ services:
     command: spawnd submit-queue drain --poll --consumer-id compose-submitter-1
 
   scheduler:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -164,7 +173,9 @@ services:
     command: spawnd schedules run-due --poll --idle-sleep-seconds 60
 
   outbox:
-    build: .
+    build:
+      context: .
+      dockerfile: Containerfile
     depends_on:
       migrate:
         condition: service_completed_successfully

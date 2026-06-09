@@ -1,0 +1,64 @@
+name: "contributor-{repo_slug}"
+description: "Unattended small contributor enhancement for {repo}."
+defaults:
+  runtime: codex
+  runtime_timeout_seconds: 1800
+  check_timeout_seconds: 300
+  check: git diff --check
+  on_failure: retry
+  retry_count: 1
+  max_cost_usd: 5.0
+  codex:
+    engine: sdk
+    sandbox: danger-full-access
+    approval_mode: deny_all
+    ephemeral: true
+cost_budget:
+  total_usd: 5.0
+  on_exceed: cancel
+orchestration:
+  concurrency_limit: 1
+  artifacts:
+    capture_raw: false
+  command_policy:
+    mode: allowlist
+  cleanup:
+    worktree: true
+  git:
+    commit: true
+    push: true
+    remote: origin
+    push_timeout_seconds: 120
+    env_refs:
+      GIT_ASKPASS: SPAWND_GIT_ASKPASS
+  runtime_isolation:
+    accepted:
+      - container
+agents:
+  - name: contributor
+    prompt: |
+      You are running unattended for {repo}.
+
+      Trigger:
+      - event: {event}
+      - action: {action}
+      - ref: {ref}
+      - before: {before}
+      - after: {after}
+      - pull request: {pr_number}
+      - head: {head_ref} {head_sha}
+      - base: {base_ref} {base_sha}
+
+      Inspect the project structure, docs, tests, and recent unfinished work.
+      Choose one small safe enhancement, bug fix, polish improvement, or
+      unfinished task that can be completed end to end without human approval.
+
+      Constraints:
+      - Keep the change narrow and consequential.
+      - Avoid contract drift, broad refactors, formatting churn, dependency
+        churn, generated-file churn, and speculative architecture.
+      - Follow the repository's existing setup, style, and verification paths.
+      - Do not read or persist secret values.
+      - Run the most relevant available verification and explain what ran.
+      - Leave the repository in a committable state with a concise final
+        summary and verification notes.
