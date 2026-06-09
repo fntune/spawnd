@@ -475,8 +475,11 @@ github-contributor-4abd61b3 cancelled
 contributor cancelled
 ```
 
-Actual GitHub webhook installation on the repositories was not performed because
-no GitHub credential was available.
+Actual GitHub webhook installation on the repositories was not performed. GitHub
+CLI access is now available and each target repo currently reports `0` hooks,
+but this local API has no durable public callback URL. `ngrok` has no configured
+local config file and `cloudflared tunnel list` has no origin certificate, so an
+ephemeral tunnel would not satisfy unattended operation.
 
 ## Verification
 
@@ -509,7 +512,8 @@ The active unattended goal is not complete. Remaining required proof:
   `GH_TOKEN`.
 - Persist provider credentials or Codex auth mounts for unattended worker
   services rather than one-shot proof containers.
-- Install real GitHub webhooks on the intended repositories.
+- Install real GitHub webhooks on the intended repositories after a durable
+  public API callback URL is available.
 - Activate schedules only after persistent provider and GitHub credentials are
   available.
 - Optional OTLP collector/export was not enabled; only the Postgres trace mirror
