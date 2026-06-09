@@ -118,6 +118,18 @@ spawnd workers
 spawnd reconcile
 ```
 
+The local compose stack also starts an OpenTelemetry collector for worker trace
+export:
+
+- OTLP gRPC: `localhost:4317`
+- OTLP HTTP: `localhost:4318`
+- collector health: `http://localhost:13133`
+
+Workers use `SPAWND_TELEMETRY_ENABLED=1`,
+`SPAWND_TELEMETRY_EXPORTER=otlp`, and
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` with
+`SPAWND_TELEMETRY_FAILURE_POLICY=degrade`.
+
 All HTTP routes except health, readiness, metrics, and GitHub webhooks require:
 
 ```text
@@ -142,6 +154,8 @@ The compose stack exposes:
 - Redis: `localhost:63799`
 - MinIO: `http://localhost:9000`
 - MinIO console: `http://localhost:9001`
+- OTLP collector HTTP: `http://localhost:4318`
+- OTLP collector health: `http://localhost:13133`
 
 The dev API token is `dev-token`.
 

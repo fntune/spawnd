@@ -46,6 +46,10 @@ orchestration:
     capture_raw: false
 ```
 
+The compose worker exports OTLP traces to the bundled collector at
+`http://otel-collector:4318`; the collector health endpoint is exposed locally
+at `http://localhost:13133`.
+
 Raw artifact capture is off by default. Runtime output, final messages, setup
 output, checks, and provider payloads are redacted before upload unless the
 plan explicitly enables raw capture.

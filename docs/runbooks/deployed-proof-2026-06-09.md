@@ -548,6 +548,45 @@ but this local API has no durable public callback URL. `ngrok` has no configured
 local config file and `cloudflared tunnel list` has no origin certificate, so an
 ephemeral tunnel would not satisfy unattended operation.
 
+## OTLP Collector Proof
+
+The local compose stack was extended with
+`otel/opentelemetry-collector-contrib:0.138.0`. The worker exports OTLP over
+HTTP to `http://otel-collector:4318` with
+`SPAWND_TELEMETRY_FAILURE_POLICY=degrade`.
+
+Collector and worker verification:
+
+```bash
+docker compose up -d otel-collector worker
+curl -fsS http://localhost:13133/
+docker compose exec -T worker sh -lc 'test "$SPAWND_TELEMETRY_ENABLED" = 1 && test "$SPAWND_TELEMETRY_EXPORTER" = otlp && test "$OTEL_EXPORTER_OTLP_ENDPOINT" = http://otel-collector:4318 && printf "telemetry=%s/%s\n" "$SPAWND_TELEMETRY_EXPORTER" "$SPAWND_TELEMETRY_FAILURE_POLICY"'
+```
+
+Result:
+
+```text
+{"status":"Server available","upSince":"2026-06-09T05:11:26.967972825Z","uptime":"58.562534087s"}
+telemetry=otlp/degrade
+```
+
+OTLP export probe used Spawnd's deployed `TelemetryRecorder` from inside the
+worker against the existing real run `real-contributor-20260609044421`, then
+flushed the OpenTelemetry provider.
+
+Postgres trace mirror:
+
+```text
+name                     export_status  attributes
+spawnd.telemetry.probe   exported       {"probe": "otel"}
+```
+
+Collector log evidence:
+
+```text
+Traces  {"otelcol.component.id":"debug","otelcol.signal":"traces","resource spans":1,"spans":1}
+```
+
 ## Verification
 
 Focused tests:
@@ -576,8 +615,6 @@ The active unattended goal is not complete. Remaining required proof:
 
 - Install real GitHub webhooks on the intended repositories after a durable
   public API callback URL is available.
-- Optional OTLP collector/export was not enabled; only the Postgres trace mirror
-  was proven.
 - The worker image has OpenAI Python, OpenAI Codex Python, and
   `claude-agent-sdk`; Anthropic Python package is not present, and no `codex`
   binary is currently on the worker `PATH`. The successful real run used Codex

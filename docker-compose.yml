@@ -25,6 +25,16 @@ services:
       timeout: 5s
       retries: 20
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.138.0
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./docker/otel-collector.yml:/etc/otelcol/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address ":9001"
@@ -95,6 +105,8 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     environment:
       SPAWND_DATABASE_URL: postgresql+psycopg://spawnd:spawnd@postgres:5432/spawnd
       SPAWND_REDIS_URL: redis://redis:6379/0
@@ -104,6 +116,12 @@ services:
       SPAWND_ARTIFACTS_PREFIX: dev
       SPAWND_SCRATCH_ROOT: /scratch
       SPAWND_RUNTIME_ISOLATION: container
+      SPAWND_TELEMETRY_ENABLED: "1"
+      SPAWND_TELEMETRY_EXPORTER: otlp
+      SPAWND_TELEMETRY_CAPTURE: orchestrator
+      SPAWND_TELEMETRY_FAILURE_POLICY: degrade
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       GIT_AUTHOR_NAME: spawnd
       GIT_AUTHOR_EMAIL: spawnd@example.invalid
       GIT_COMMITTER_NAME: spawnd
