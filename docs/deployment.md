@@ -68,16 +68,16 @@ Worker:
 spawnd worker --poll --worker-id worker-a
 ```
 
-Outbox drainer, if not relying on worker polling:
+Outbox drainer:
 
 ```bash
-spawnd drain-outbox
+spawnd drain-outbox --poll --idle-sleep-seconds 5
 ```
 
 Scheduler runner, for durable schedules:
 
 ```bash
-spawnd schedules run-due
+spawnd schedules run-due --poll --idle-sleep-seconds 60
 ```
 
 Submission queue consumer, for asynchronous external ingress:

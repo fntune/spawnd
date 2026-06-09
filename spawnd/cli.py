@@ -242,10 +242,23 @@ def reconcile(create_schema: bool) -> None:
 
 @main.command("drain-outbox")
 @click.option("--limit", type=int, default=100, show_default=True)
-def drain_outbox(limit: int) -> None:
+@click.option("--poll", "run_poll_flag", is_flag=True, help="Continuously publish pending queue outbox rows")
+@click.option("--idle-sleep-seconds", type=float, default=5.0, show_default=True)
+def drain_outbox(limit: int, run_poll_flag: bool, idle_sleep_seconds: float) -> None:
     """Publish pending queue outbox rows to Redis."""
 
-    published = drain_queue_outbox(_repository(), _coordinator(), limit=limit)
+    repo = _repository()
+    coordinator = _coordinator()
+    if run_poll_flag:
+        click.echo("Outbox drainer polling")
+        while True:
+            published = drain_queue_outbox(repo, coordinator, limit=limit)
+            if published:
+                click.echo(f"Published outbox rows: {len(published)}")
+                for item in published:
+                    click.echo(f"  {item['run_id']}/{item['agent']}")
+            time.sleep(idle_sleep_seconds)
+    published = drain_queue_outbox(repo, coordinator, limit=limit)
     click.echo(f"Published outbox rows: {len(published)}")
     for item in published:
         click.echo(f"  {item['run_id']}/{item['agent']}")
@@ -563,10 +576,26 @@ def schedule_put(schedule_id: str, template_id: str, name: str | None, interval_
 @schedules.command("run-due")
 @click.option("--limit", type=int, default=100, show_default=True)
 @click.option("--json", "as_json", is_flag=True)
-def schedules_run_due(limit: int, as_json: bool) -> None:
+@click.option("--poll", "run_poll_flag", is_flag=True, help="Continuously submit due schedules")
+@click.option("--idle-sleep-seconds", type=float, default=60.0, show_default=True)
+def schedules_run_due(limit: int, as_json: bool, run_poll_flag: bool, idle_sleep_seconds: float) -> None:
     """Submit runs for due recurring schedules."""
 
-    submitted = submit_due_schedules(repository=_repository(), coordinator=_coordinator(), limit=limit)
+    repo = _repository()
+    coordinator = _coordinator()
+    if run_poll_flag:
+        click.echo("Scheduler polling")
+        while True:
+            submitted = submit_due_schedules(repository=repo, coordinator=coordinator, limit=limit)
+            if submitted:
+                if as_json:
+                    _json_echo(submitted)
+                else:
+                    click.echo(f"Schedules submitted: {len(submitted)}")
+                    for item in submitted:
+                        click.echo(f"  {item['schedule_id']} -> {item['run_id']}")
+            time.sleep(idle_sleep_seconds)
+    submitted = submit_due_schedules(repository=repo, coordinator=coordinator, limit=limit)
     if as_json:
         _json_echo(submitted)
         return

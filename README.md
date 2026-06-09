@@ -361,7 +361,7 @@ spawnd templates put contributor -f contributor-template.yaml \
   --source-ref-template '{after}'
 spawnd templates run contributor --param clone_url=https://github.com/acme/app.git --param after=main
 spawnd schedules put nightly --template-id contributor --interval-seconds 86400
-spawnd schedules run-due
+spawnd schedules run-due --poll --idle-sleep-seconds 60
 spawnd submit-queue enqueue-template contributor --param clone_url=https://github.com/acme/app.git
 spawnd submit-queue drain --once
 ```
@@ -370,6 +370,10 @@ External systems can enqueue JSON messages onto the Redis submission stream
 through `POST /submissions` or directly to Redis. `spawnd submit-queue drain
 --poll` consumes those messages, validates them, and creates canonical Postgres
 runs.
+
+Run `spawnd drain-outbox --poll --idle-sleep-seconds 5` as a separate service
+when you want an independent outbox relay in addition to the worker's poll-loop
+drain.
 
 Notifications use backend environment configuration, not raw secrets in plans.
 Set `SPAWND_NOTIFICATION_WEBHOOK_URL`; failed, timed-out, cancelled, and

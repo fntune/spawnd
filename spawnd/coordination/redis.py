@@ -78,7 +78,7 @@ class RedisCoordinator:
         self.redis.xadd(READY_STREAM, {'run_id': run_id, 'agent': agent})
 
     def read_agent(self, worker_id: str, *, block_ms: int = 1000) -> AgentJob | None:
-        messages = self.redis.xreadgroup(WORKER_GROUP, worker_id, {READY_STREAM: '>'}, count=1, block=block_ms)
+        messages = self._read_group(WORKER_GROUP, worker_id, READY_STREAM, block_ms=block_ms)
         if not messages:
             return None
         _, entries = messages[0]
@@ -87,7 +87,7 @@ class RedisCoordinator:
 
     def ack_agent(self, job: AgentJob) -> None:
         if job.message_id:
-            self.redis.xack(READY_STREAM, WORKER_GROUP, job.message_id)
+            self._ack_group(READY_STREAM, WORKER_GROUP, job.message_id)
 
     def queue_depth(self) -> int:
         return int(self.redis.xlen(READY_STREAM))
@@ -96,7 +96,7 @@ class RedisCoordinator:
         self.redis.xadd(SUBMISSION_STREAM, {'payload': json.dumps(payload, sort_keys=True)})
 
     def read_submission(self, consumer_id: str, *, block_ms: int = 1000) -> RunSubmissionJob | None:
-        messages = self.redis.xreadgroup(SUBMITTER_GROUP, consumer_id, {SUBMISSION_STREAM: '>'}, count=1, block=block_ms)
+        messages = self._read_group(SUBMITTER_GROUP, consumer_id, SUBMISSION_STREAM, block_ms=block_ms)
         if not messages:
             return None
         _, entries = messages[0]
@@ -106,7 +106,7 @@ class RedisCoordinator:
 
     def ack_submission(self, job: RunSubmissionJob) -> None:
         if job.message_id:
-            self.redis.xack(SUBMISSION_STREAM, SUBMITTER_GROUP, job.message_id)
+            self._ack_group(SUBMISSION_STREAM, SUBMITTER_GROUP, job.message_id)
 
     def submission_queue_depth(self) -> int:
         return int(self.redis.xlen(SUBMISSION_STREAM))
@@ -149,6 +149,22 @@ class RedisCoordinator:
 
     def is_cancelled(self, run_id: str) -> bool:
         return bool(self.redis.get(_cancel_key(run_id)))
+
+    def _read_group(self, group: str, consumer: str, stream: str, *, block_ms: int) -> Any:
+        try:
+            return self.redis.xreadgroup(group, consumer, {stream: '>'}, count=1, block=block_ms)
+        except Exception as exc:
+            if not _is_missing_group_error(exc):
+                raise
+            self._ensure_stream_group(stream, group)
+            return self.redis.xreadgroup(group, consumer, {stream: '>'}, count=1, block=block_ms)
+
+    def _ack_group(self, stream: str, group: str, message_id: str) -> None:
+        try:
+            self.redis.xack(stream, group, message_id)
+        except Exception as exc:
+            if not _is_missing_group_error(exc):
+                raise
 
 
 class InMemoryCoordinator:
@@ -236,3 +252,8 @@ def _cancel_channel(run_id: str) -> str:
 
 def _cancel_key(run_id: str) -> str:
     return f'spawnd:runs:{run_id}:cancelled'
+
+
+def _is_missing_group_error(exc: Exception) -> bool:
+    message = str(exc)
+    return 'NOGROUP' in message or 'requires the key to exist' in message

@@ -1367,4 +1367,5 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
 
 @contextmanager
 def _git_repo_lock(repo_path: Path) -> Iterator[None]:
-    yield from _file_lock(repo_path / '.spawnd-git.lock')
+    with _file_lock(repo_path / '.spawnd-git.lock'):
+        yield
