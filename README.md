@@ -328,6 +328,7 @@ Endpoints:
 - `GET /templates`
 - `POST /templates/{template_id}/runs`
 - `POST /schedules`
+- `PATCH /schedules/{schedule_id}/status`
 - `POST /schedules/run-due`
 - `POST /submissions`
 - `POST /submissions/drain`
@@ -359,6 +360,19 @@ fields.
 All HTTP routes except health, readiness, metrics, and GitHub webhooks require
 `Authorization: Bearer $SPAWND_API_TOKEN`. GitHub webhooks verify
 `X-Hub-Signature-256` against `SPAWND_GITHUB_WEBHOOK_SECRET`.
+
+Install repository webhooks with a durable public API base URL:
+
+```bash
+export SPAWND_GITHUB_WEBHOOK_SECRET='same-secret-as-api'
+spawnd github-webhooks install \
+  --base-url https://spawnd.example.com \
+  --repo fntune/subport \
+  --repo fntune/stockbay \
+  --repo fntune/fn \
+  --repo fntune/biomon \
+  --repo fntune/cashgrep
+```
 
 Reusable templates and schedules are durable Postgres records:
 

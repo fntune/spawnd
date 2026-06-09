@@ -3,8 +3,8 @@
 This runbook records the deployed Spawnd proof performed against the local Docker
 stack on 2026-06-09. The stack used real Postgres, Redis, and MinIO. It includes
 both an initial mock runtime proof and a later real Codex-backed contributor run.
-The full unattended goal is still not complete because persistent provider/GitHub
-secret wiring, real GitHub webhook installation, and OTLP export remain open.
+The full unattended goal is still not complete because real GitHub webhook
+installation requires a durable public API callback URL.
 
 ## Environment
 
@@ -547,6 +547,47 @@ CLI access is now available and each target repo currently reports `0` hooks,
 but this local API has no durable public callback URL. `ngrok` has no configured
 local config file and `cloudflared tunnel list` has no origin certificate, so an
 ephemeral tunnel would not satisfy unattended operation.
+
+Webhook installation command added and verified in dry-run mode:
+
+```bash
+SPAWND_GITHUB_WEBHOOK_SECRET=dev-webhook-secret \
+python -m spawnd.cli github-webhooks install \
+  --base-url https://spawnd.example.com \
+  --repo fntune/subport \
+  --repo fntune/stockbay \
+  --repo fntune/fn \
+  --repo fntune/biomon \
+  --repo fntune/cashgrep \
+  --dry-run \
+  --json
+```
+
+Result:
+
+```text
+fntune/subport    create  https://spawnd.example.com/webhooks/github/github-contributor
+fntune/stockbay   create  https://spawnd.example.com/webhooks/github/github-contributor
+fntune/fn         create  https://spawnd.example.com/webhooks/github/github-contributor
+fntune/biomon     create  https://spawnd.example.com/webhooks/github/github-contributor
+fntune/cashgrep   create  https://spawnd.example.com/webhooks/github/github-contributor
+```
+
+Local/non-durable callback rejection proof:
+
+```bash
+SPAWND_GITHUB_WEBHOOK_SECRET=dev-webhook-secret \
+python -m spawnd.cli github-webhooks install \
+  --base-url http://localhost:8765 \
+  --repo fntune/subport \
+  --dry-run
+```
+
+Result:
+
+```text
+Error: webhook base URL must use https
+```
 
 ## OTLP Collector Proof
 

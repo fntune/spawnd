@@ -8,7 +8,14 @@ released.
 
 ## Unreleased
 
-- No unreleased changes yet.
+### Added
+
+- Persistent compose worker auth wiring for Codex auth, GitHub tokens, git
+  askpass, and the bundled Codex CLI.
+- Local compose OTLP collector with worker OTLP export enabled by default.
+- Schedule activation controls through CLI and HTTP API.
+- `spawnd github-webhooks install` for idempotent GitHub webhook create/update
+  against durable public callback URLs.
 
 ## 2026-06-08 - Unattended Readiness
 
