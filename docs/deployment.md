@@ -42,7 +42,9 @@ git tokens, or `.env` contents into plan YAML.
 The container worker exposes the stable secret-reference names used by deployed
 plans:
 
-- `SPAWND_CODEX_AUTH_DIR` mounts Codex auth into `/root/.codex`.
+- `SPAWND_CODEX_AUTH_DIR` points at the seed Codex auth directory. Podman
+  copies `auth.json` into a writable `spawnd-codex-home` volume and mounts that
+  volume at `/root/.codex`, because Codex creates local SQLite state at runtime.
 - `SPAWND_GITHUB_TOKEN` is loaded from the ignored deployment `.env` and is
   available to git through the askpass helper.
 - `SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` points git HTTPS
@@ -231,12 +233,12 @@ The Podman stack exposes:
 The dev API token is `dev-token`.
 
 The worker reads persistent credentials from `.env`. `SPAWND_CODEX_AUTH_DIR`
-must point at a readable Codex auth directory and `SPAWND_GITHUB_TOKEN` is used
-only by the worker git askpass helper.
+must point at a readable Codex auth directory containing `auth.json`.
+`SPAWND_GITHUB_TOKEN` is used only by the worker git askpass helper.
 
 ```bash
 deploy/podman/down.sh
-deploy/podman/down.sh --volumes  # removes Postgres, MinIO, and scratch state
+deploy/podman/down.sh --volumes  # removes Postgres, MinIO, scratch, and Codex state
 ```
 
 The Compose file remains available for environments that intentionally run

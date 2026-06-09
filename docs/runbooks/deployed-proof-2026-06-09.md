@@ -854,6 +854,225 @@ check: git diff --check
 agent: contributor
 ```
 
+## Micro-1 Real Runtime Continuation
+
+The first real Codex run on `micro-1` after queue-depth validation exposed a
+deployment bug:
+
+```text
+real-podman-contributor-20260609165847 failed
+Codex process closed stdout ... failed to initialize sqlite state runtime under /root/.codex ... unable to open database file
+```
+
+Cause: the worker mounted `SPAWND_CODEX_AUTH_DIR` directly at `/root/.codex:ro`.
+Codex 0.137.0-alpha.4 reads `auth.json` there but also creates SQLite runtime
+state under the same home directory.
+
+Fix:
+
+- `deploy/podman/up.sh` now creates `${PROJECT}_spawnd-codex-home`.
+- `seed_codex_home` copies only `auth.json` from `SPAWND_CODEX_AUTH_DIR` into
+  that writable volume.
+- the worker mounts `${PROJECT}_spawnd-codex-home:/root/.codex`.
+- `deploy/podman/down.sh --volumes` removes the Codex home volume with the rest
+  of deployed state.
+
+Validation:
+
+```bash
+bash -n deploy/podman/up.sh deploy/podman/down.sh
+git diff --check
+rsync -az --delete --exclude .git --exclude .env --exclude .venv \
+  --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache \
+  /Users/sour4bh/dev/spawnd/ micro-1:/home/ubuntu/spawnd/
+ssh micro-1 'cd /home/ubuntu/spawnd && SPAWND_PODMAN_SKIP_BUILD=1 deploy/podman/up.sh'
+ssh micro-1 'podman exec spawnd_worker_1 sh -lc '"'"'test -w /root/.codex && test -r /root/.codex/auth.json && codex --version'"'"''
+```
+
+Result:
+
+```text
+codex_home_writable
+codex_auth_seeded
+codex-cli 0.137.0-alpha.4
+```
+
+Successful real Codex-backed contributor run:
+
+```text
+run_id: real-podman-contributor-20260609170708
+source_repo: https://github.com/fntune/spawnd.git
+source_ref: origin/main
+worker: podman-worker-1
+runtime: codex sdk
+status: completed
+input_tokens: 63317
+output_tokens: 976
+cost_usd: 0.331225
+```
+
+Plan shape:
+
+- setup: `python -m compileall -q spawnd`
+- check: `git diff --check`
+- git commit: enabled
+- git push: enabled
+- raw artifact capture: disabled
+- telemetry exporter: OTLP with degrade failure policy
+- cleanup: disabled for this proof so `spawnd pr create` could use the
+  recorded worktree path
+
+Postgres evidence:
+
+```text
+runs agents attempts events checks traces artifacts provenance sessions invocations token_rows cost_rows
+1    1      1        9      1      12     5         1          1        3           1          1
+```
+
+Runtime records:
+
+```text
+setup   completed
+runtime completed
+check   completed
+```
+
+Usage records:
+
+```text
+token_usage: provider=openai input_tokens=63317 output_tokens=976
+cost_usage:  provider=openai amount_usd=0.331225 source=estimated
+```
+
+Artifact objects in MinIO:
+
+```text
+dev/runs/real-podman-contributor-20260609170708/contributor/setup-output-15cce008ed66407caf08bd18af50a903.txt
+dev/runs/real-podman-contributor-20260609170708/contributor/runtime-output-4a9dd2ab220b4c8fa69d8f0111d37a3d.txt
+dev/runs/real-podman-contributor-20260609170708/contributor/final-message-cd3c340e39f744ddaa067dee6f4fe65f.txt
+dev/runs/real-podman-contributor-20260609170708/contributor/check-output-110edd0b47334295a276aa56aeb4dd1d.txt
+dev/runs/real-podman-contributor-20260609170708/contributor/patch-53f659867d9141a89c3e5d9bf41514a2.txt
+```
+
+Artifact-backed logs:
+
+```text
+Updated docs/deployment.md with a concise operator note clarifying that
+queue_depth and submission_queue_depth are Redis consumer-group backlog, not raw
+stream history, and that acknowledged entries can remain while backlog is zero.
+
+Verification: git diff --check -- docs/deployment.md passed.
+Only docs/deployment.md is modified.
+```
+
+Git provenance:
+
+```text
+base_sha: c6a0bda7b0db9f1c0604f0e19599a0ffbd9404b6
+commit_sha: a9b06dd4698bf33ef3e1f345588da4e630c49ba0
+branch: spawnd/real-podman-contributor-20260609170708/contributor
+changed files: 1
+insertions: 4
+deletions: 0
+patch_artifact_id: 6df99a23df0546f9bfa11bd9f6f25f6b
+```
+
+Remote branch proof:
+
+```text
+a9b06dd4698bf33ef3e1f345588da4e630c49ba0 refs/heads/spawnd/real-podman-contributor-20260609170708/contributor
+```
+
+PR creation command:
+
+```bash
+ssh micro-1 'podman exec spawnd_worker_1 sh -lc '"'"'export GH_TOKEN="$SPAWND_GITHUB_TOKEN"; spawnd pr create real-podman-contributor-20260609170708 --agent contributor --title-prefix spawnd-real-podman --timeout-seconds 120'"'"''
+```
+
+Result:
+
+```text
+https://github.com/fntune/spawnd/pull/9
+```
+
+GitHub PR proof:
+
+```text
+number: 9
+state: OPEN
+baseRefName: main
+headRefName: spawnd/real-podman-contributor-20260609170708/contributor
+headRefOid: a9b06dd4698bf33ef3e1f345588da4e630c49ba0
+files: docs/deployment.md +4 -0
+```
+
+Postgres provenance was updated with:
+
+```text
+pr_url: https://github.com/fntune/spawnd/pull/9
+pr_number: 9
+```
+
+Redis-loss reconstruction proof:
+
+```bash
+ssh micro-1 'podman exec spawnd_redis_1 redis-cli flushdb'
+ssh micro-1 'podman exec spawnd_api_1 spawnd status real-podman-contributor-20260609170708 --json'
+ssh micro-1 'podman exec spawnd_api_1 spawnd provenance real-podman-contributor-20260609170708 --json'
+ssh micro-1 'podman exec spawnd_api_1 spawnd workers --json'
+```
+
+Result:
+
+```text
+redis flushdb: OK
+run status: completed
+provenance: PR #9 and commit a9b06dd4698bf33ef3e1f345588da4e630c49ba0 reconstructed from Postgres
+queue_depth: 0
+submission_queue_depth: 0
+podman-worker-1: active, stale=false
+```
+
+Cancellation proof:
+
+```text
+run_id: cancel-podman-20260609171507
+command: spawnd cancel cancel-podman-20260609171507
+one-shot worker: spawnd worker --once --mock --worker-id cancel-proof-worker --block-ms 1000
+```
+
+Result:
+
+```text
+Cancelled run cancel-podman-20260609171507
+Agents cancelled: 1
+Worker cancel-proof-worker found no ready agents
+run status: cancelled
+agent status: cancelled
+attempts: 0
+events: run_created, run_cancelled
+```
+
+Retry/recovery proof:
+
+```text
+run_id: retry-podman-20260609171621
+attempt 1: claimed by lost-worker
+lease action: agents and agent_attempts leased_until aged 10 minutes into the past
+reconcile: Requeued hints: 1
+attempt 2: completed by retry-proof-worker with --mock against deployed Postgres/Redis/S3
+```
+
+Result:
+
+```text
+run status: completed
+retry_attempt: 1
+attempt 1: expired, worker_id=lost-worker
+attempt 2: completed, worker_id=retry-proof-worker
+events: run_created, agent_claimed, lease_expired, agent_claimed, worktree_source_resolved, started, done, worktree_cleaned
+```
+
 ## Verification
 
 Focused tests:
@@ -880,5 +1099,7 @@ Result: passed.
 
 The durable public callback blocker is closed on `micro-1`: Podman API is
 reachable through Tailscale Funnel and GitHub reports all five hooks active with
-HTTP 200 pings. Remaining operational choices are intentional activation of
-paused recurring schedules and the first real push/PR-triggered contributor run.
+HTTP 200 pings. A real Codex-backed contributor run completed through deployed
+Spawnd and produced PR #9. Remaining operational choices are intentional
+activation of the five paused recurring schedules and whether to trigger the
+first real GitHub push/PR webhook contributor run on one of the product repos.
