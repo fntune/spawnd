@@ -122,3 +122,100 @@ The compose stack exposes:
 - MinIO console: `http://localhost:9001`
 
 The dev API token is `dev-token`.
+
+## Real Codex Contributor Job
+
+The mock proof in `docs/runbooks/deployed-proof-2026-06-09.md` validates the
+deployed control plane. To run the same path with a real Codex-backed
+contributor, use a worker image that has the `codex` CLI available, mount the
+Codex auth directory into the worker container read-only, and provide a GitHub
+token only through environment variables.
+
+Minimum operator prerequisites:
+
+- `codex exec --json` works inside the worker image.
+- `gh` is available in the image or installed before running `spawnd pr create`.
+- The mounted Codex auth directory is readable by the worker user. The compose
+  image runs as root, so the default mount target is `/root/.codex`.
+- The GitHub token has `contents:write` for branch pushes and
+  `pull_requests:write` for PR creation.
+- The worker still has `SPAWND_RUNTIME_ISOLATION=container`, `jail`, or `vm`.
+
+Use an askpass helper for git HTTPS authentication. Store the helper in your
+operator-managed secret/config path, not in the repository:
+
+```sh
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *) printf '%s\n' "$GITHUB_TOKEN" ;;
+esac
+```
+
+Submit a plan that references worker environment names instead of embedding
+secrets:
+
+```yaml
+name: real-codex-contributor
+orchestration:
+  worktree_source:
+    base_ref: origin/main
+    fetch: true
+    env_refs:
+      GIT_ASKPASS: SPAWND_GIT_ASKPASS
+      GITHUB_TOKEN: SPAWND_GITHUB_TOKEN
+  git:
+    commit: true
+    push: true
+    remote: origin
+    env_refs:
+      GIT_ASKPASS: SPAWND_GIT_ASKPASS
+      GITHUB_TOKEN: SPAWND_GITHUB_TOKEN
+agents:
+  - name: contributor
+    runtime: codex
+    codex:
+      engine: cli
+      sandbox: workspace-write
+      approval_mode: deny_all
+      ephemeral: true
+    prompt: Make one small, safe improvement and keep the change narrow.
+    check: pytest -q
+```
+
+Submit against the real repository URL:
+
+```bash
+export SPAWND_API_TOKEN=dev-token
+spawnd run -f real-codex-contributor.yaml \
+  --source-repo https://github.com/OWNER/REPO.git \
+  --source-ref origin/main
+```
+
+Run a mounted one-shot worker for proof, or add the same mounts/env to the
+polling worker service:
+
+```bash
+export GITHUB_TOKEN=...
+docker compose run --rm \
+  -v "$HOME/.codex:/root/.codex:ro" \
+  -v "/secure/path/spawnd-git-askpass:/run/spawnd/git-askpass:ro" \
+  -e SPAWND_GITHUB_TOKEN="$GITHUB_TOKEN" \
+  -e SPAWND_GIT_ASKPASS=/run/spawnd/git-askpass \
+  worker spawnd worker --once --worker-id real-codex-proof-1
+```
+
+Open the PR from recorded provenance with the same GitHub token available to
+`gh` and git:
+
+```bash
+docker compose run --rm \
+  -v "/secure/path/spawnd-git-askpass:/run/spawnd/git-askpass:ro" \
+  -e GH_TOKEN="$GITHUB_TOKEN" \
+  -e GITHUB_TOKEN="$GITHUB_TOKEN" \
+  -e GIT_ASKPASS=/run/spawnd/git-askpass \
+  worker spawnd pr create <run-id> --agent contributor --title-prefix spawnd
+```
+
+Do not pass `--mock` for this proof. Verify the run with `spawnd status`,
+`spawnd checks`, `spawnd provenance`, and the returned GitHub PR URL.

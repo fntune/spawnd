@@ -227,6 +227,9 @@ boundary. Set `SPAWND_RUNTIME_ISOLATION=container`, `jail`, or `vm` on deployed
 workers after placing them in that boundary. Mock runs and readonly agents do
 not require it. Without this marker, the worker fails the agent before setup or
 provider execution instead of running write/edit tools on an unisolated host.
+For an operator recipe that runs a real Codex-backed contributor with Codex auth
+mounted into the worker and a GitHub token used for branch push and PR creation,
+see [docs/deployment.md](docs/deployment.md#real-codex-contributor-job).
 
 Recover queue hints from Postgres:
 
