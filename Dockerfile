@@ -16,4 +16,8 @@ RUN chmod 0755 /usr/local/bin/spawnd-git-askpass
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir ".[deployed,telemetry,openai,codex,sdk]"
 
+RUN codex_bin="$(python -c 'import pathlib, site; print(next(pathlib.Path(root) / "codex_cli_bin" / "bin" / "codex" for root in site.getsitepackages() if (pathlib.Path(root) / "codex_cli_bin" / "bin" / "codex").exists()))')" \
+    && ln -sf "$codex_bin" /usr/local/bin/codex \
+    && codex --version
+
 CMD ["spawnd", "serve", "--host", "0.0.0.0", "--port", "8765"]

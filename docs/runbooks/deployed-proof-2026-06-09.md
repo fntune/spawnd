@@ -587,6 +587,25 @@ Collector log evidence:
 Traces  {"otelcol.component.id":"debug","otelcol.signal":"traces","resource spans":1,"spans":1}
 ```
 
+## Worker Runtime Binary Proof
+
+The Dockerfile links the bundled `openai-codex-cli-bin` binary onto the worker
+`PATH` after installing Python dependencies.
+
+Verification from the running worker:
+
+```bash
+docker compose exec -T worker sh -lc 'command -v codex && codex --version'
+```
+
+Result:
+
+```text
+/usr/local/bin/codex
+WARNING: proceeding, even though we could not update PATH: Read-only file system (os error 30)
+codex-cli 0.137.0-alpha.4
+```
+
 ## Verification
 
 Focused tests:
@@ -615,7 +634,6 @@ The active unattended goal is not complete. Remaining required proof:
 
 - Install real GitHub webhooks on the intended repositories after a durable
   public API callback URL is available.
-- The worker image has OpenAI Python, OpenAI Codex Python, and
-  `claude-agent-sdk`; Anthropic Python package is not present, and no `codex`
-  binary is currently on the worker `PATH`. The successful real run used Codex
-  SDK, not Codex CLI.
+- The worker image has OpenAI Python, OpenAI Codex Python, `claude-agent-sdk`,
+  and the bundled `codex` CLI linked on `PATH`. The successful real run used
+  Codex SDK, not Codex CLI.
