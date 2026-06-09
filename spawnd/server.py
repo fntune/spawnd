@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -55,6 +55,13 @@ class ScheduleBody(BaseModel):
     name: str
     interval_seconds: int
     parameters: dict[str, Any] = {}
+    status: Literal['active', 'paused'] = 'active'
+
+
+class ScheduleStatusBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    status: Literal['active', 'paused']
 
 
 class SubmissionBody(BaseModel):
@@ -259,8 +266,17 @@ def create_app() -> FastAPI:
             name=body.name,
             interval_seconds=body.interval_seconds,
             parameters=body.parameters,
+            status=body.status,
         )
         return {"schedule_id": body.id}
+
+    @app.patch("/schedules/{schedule_id}/status")
+    def set_schedule_status(schedule_id: str, body: ScheduleStatusBody) -> dict[str, str]:
+        try:
+            _repository().set_schedule_status(schedule_id, status=body.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"schedule_id": schedule_id, "status": body.status}
 
     @app.post("/schedules/run-due")
     def run_due_schedules(limit: int = 100) -> list[dict[str, Any]]:

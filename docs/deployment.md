@@ -94,6 +94,14 @@ Scheduler runner, for durable schedules:
 spawnd schedules run-due --poll --idle-sleep-seconds 60
 ```
 
+Create schedules with an explicit status, and flip existing schedules without
+rewriting their `next_run_at`:
+
+```bash
+spawnd schedules put nightly --template-id contributor --interval-seconds 86400 --status paused
+spawnd schedules set-status nightly --status active
+```
+
 Submission queue consumer, for asynchronous external ingress:
 
 ```bash

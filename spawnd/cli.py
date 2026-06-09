@@ -559,8 +559,9 @@ def schedules() -> None:
 @click.option("--template-id", required=True)
 @click.option("--name", default=None)
 @click.option("--interval-seconds", type=int, required=True)
+@click.option("--status", type=click.Choice(["active", "paused"]), default="active", show_default=True)
 @click.option("--param", "params", multiple=True, help="Template parameter as key=value")
-def schedule_put(schedule_id: str, template_id: str, name: str | None, interval_seconds: int, params: tuple[str, ...]) -> None:
+def schedule_put(schedule_id: str, template_id: str, name: str | None, interval_seconds: int, status: str, params: tuple[str, ...]) -> None:
     """Create or update a recurring schedule."""
 
     _repository().create_schedule(
@@ -569,8 +570,19 @@ def schedule_put(schedule_id: str, template_id: str, name: str | None, interval_
         name=name or schedule_id,
         interval_seconds=interval_seconds,
         parameters=_parse_params(params),
+        status=status,
     )
     click.echo(f"Schedule saved: {schedule_id}")
+
+
+@schedules.command("set-status")
+@click.argument("schedule_id")
+@click.option("--status", type=click.Choice(["active", "paused"]), required=True)
+def schedule_set_status(schedule_id: str, status: str) -> None:
+    """Activate or pause an existing recurring schedule."""
+
+    _repository().set_schedule_status(schedule_id, status=status)
+    click.echo(f"Schedule status updated: {schedule_id} -> {status}")
 
 
 @schedules.command("run-due")

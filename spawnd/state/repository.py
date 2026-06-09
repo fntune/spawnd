@@ -301,6 +301,19 @@ class DeployedRepository:
             else:
                 conn.execute(insert(schema.schedules).values(id=schedule_id, created_at=now, **values))
 
+    def set_schedule_status(self, schedule_id: str, *, status: str) -> None:
+        if status not in {'active', 'paused'}:
+            raise ValueError('schedule status must be active or paused')
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(schema.schedules)
+                .where(schema.schedules.c.id == schedule_id)
+                .values(status=status, updated_at=now)
+            )
+            if result.rowcount == 0:
+                raise ValueError(f'schedule not found: {schedule_id}')
+
     def due_schedules(self, *, now: datetime | None = None, limit: int = 100) -> list[dict[str, Any]]:
         now = now or datetime.now(timezone.utc)
         with self.engine.connect() as conn:

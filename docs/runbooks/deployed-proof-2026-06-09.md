@@ -493,7 +493,7 @@ contributor-cashgrep  https://github.com/fntune/cashgrep.git  origin/main
 github-contributor    {clone_url}                             {after}
 ```
 
-Paused nightly schedules created:
+Nightly schedules created:
 
 ```text
 contributor-subport-nightly
@@ -503,7 +503,29 @@ contributor-biomon-nightly
 contributor-cashgrep-nightly
 ```
 
-All schedules are `paused`, interval `86400`, pending credential wiring.
+Schedules were activated after persistent Codex/GitHub credential wiring was
+verified. The activation preserved each future `next_run_at`, so no contributor
+runs were submitted immediately.
+
+```bash
+docker compose exec -T api spawnd schedules set-status contributor-subport-nightly --status active
+docker compose exec -T api spawnd schedules set-status contributor-stockbay-nightly --status active
+docker compose exec -T api spawnd schedules set-status contributor-fn-nightly --status active
+docker compose exec -T api spawnd schedules set-status contributor-biomon-nightly --status active
+docker compose exec -T api spawnd schedules set-status contributor-cashgrep-nightly --status active
+docker compose exec -T api spawnd schedules run-due --json
+```
+
+Result:
+
+```text
+contributor-biomon-nightly    active  2026-06-10 04:17:31.791861+00
+contributor-cashgrep-nightly  active  2026-06-10 04:17:31.796403+00
+contributor-fn-nightly        active  2026-06-10 04:17:31.787527+00
+contributor-stockbay-nightly  active  2026-06-10 04:17:31.783407+00
+contributor-subport-nightly   active  2026-06-10 04:17:31.777313+00
+[]
+```
 
 Webhook receiver proof:
 
@@ -554,8 +576,6 @@ The active unattended goal is not complete. Remaining required proof:
 
 - Install real GitHub webhooks on the intended repositories after a durable
   public API callback URL is available.
-- Activate schedules if the intended repos should start recurring contributor
-  runs from this local stack.
 - Optional OTLP collector/export was not enabled; only the Postgres trace mirror
   was proven.
 - The worker image has OpenAI Python, OpenAI Codex Python, and

@@ -179,6 +179,7 @@ agents:
             'template_id': 'contributor',
             'name': 'Nightly contributor',
             'interval_seconds': 60,
+            'status': 'paused',
             'parameters': {
                 'name': 'scheduled',
                 'repo': 'acme/app',
@@ -188,6 +189,14 @@ agents:
         },
     )
     assert response.status_code == 200
+
+    response = client.post('/schedules/run-due', headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == []
+
+    response = client.patch('/schedules/schedule-1/status', headers=AUTH, json={'status': 'active'})
+    assert response.status_code == 200
+    assert response.json() == {'schedule_id': 'schedule-1', 'status': 'active'}
 
     response = client.post('/schedules/run-due', headers=AUTH)
     assert response.status_code == 200
