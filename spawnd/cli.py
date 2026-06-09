@@ -721,28 +721,25 @@ def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefi
 
     if not agent_name and not all_agents:
         raise click.UsageError("Pass --agent or --all")
-    rows = _repository().get_git_provenance(run_id, agent_name)
+    repo = _repository()
+    rows = repo.get_git_provenance(run_id, agent_name)
     for row in rows:
         branch = row.get("branch")
         if not branch:
             click.echo(f"Skipping {row.get('agent')}: no branch recorded", err=True)
             continue
         branch_name = str(branch)
-        worktree_locator = row.get("worktree_locator")
+        repo_path = _provenance_repo_path(row)
+        if repo_path is None:
+            raise click.UsageError(f"Cannot create PR for {row.get('agent')}: no worktree or source repository recorded")
         if not no_push:
-            push_path = Path(str(worktree_locator)) if worktree_locator else None
-            if push_path is None or not push_path.exists():
-                diff_stats = row.get("diff_stats") if isinstance(row.get("diff_stats"), dict) else {}
-                source_repo = diff_stats.get("source_repo")
-                push_path = Path(str(source_repo)) if source_repo else None
-            if push_path is None or not push_path.exists():
-                raise click.UsageError(f"Cannot push {row.get('agent')}: no worktree or source repository recorded")
-            push_branch(push_path, branch_name, remote=remote, timeout_seconds=timeout_seconds)
+            push_branch(repo_path, branch_name, remote=remote, timeout_seconds=timeout_seconds)
         agent_label = row.get("agent") or "run"
         title = f"{title_prefix}: {run_id}/{agent_label}"
         body = json.dumps({"run_id": run_id, "agent": agent_label, "provenance": row}, indent=2, default=str)
         result = subprocess.run(
             ["gh", "pr", "create", "--head", branch_name, "--title", title, "--body", body],
+            cwd=repo_path,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -750,7 +747,24 @@ def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefi
         if result.returncode != 0:
             click.echo(result.stderr.strip() or result.stdout.strip(), err=True)
             raise click.Abort()
-        click.echo(result.stdout.strip())
+        pr_url = result.stdout.strip()
+        repo.record_pull_request(run_id, str(row["agent"]) if row.get("agent") else None, pr_url)
+        click.echo(pr_url)
+
+
+def _provenance_repo_path(row: dict[str, Any]) -> Path | None:
+    worktree_locator = row.get("worktree_locator")
+    if worktree_locator:
+        path = Path(str(worktree_locator))
+        if path.exists():
+            return path
+    diff_stats = row.get("diff_stats") if isinstance(row.get("diff_stats"), dict) else {}
+    source_repo = diff_stats.get("source_repo")
+    if source_repo:
+        path = Path(str(source_repo))
+        if path.exists():
+            return path
+    return None
 
 
 @pr.command("merge")

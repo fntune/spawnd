@@ -107,6 +107,8 @@ Fixes:
 - Redis acks tolerate missing groups because Redis is a coordination hint plane.
 - CLI now supports polling scheduler and outbox-drainer modes.
 - Compose now runs `scheduler` and `outbox` services.
+- `spawnd pr create` now runs `gh pr create` from the provenance repo path and
+  writes the created PR URL/number back to `git_provenance`.
 
 ## Completed Deployed Proof Run
 
@@ -155,6 +157,31 @@ Git provenance:
 - changed files: `1`
 - insertions: `1`
 - deletions: `0`
+
+PR proof:
+
+```bash
+docker compose run --rm -e GH_TOKEN="$(gh auth token)" -e DEBIAN_FRONTEND=noninteractive worker sh -lc \
+  'set -e; command -v gh || (apt-get update >/dev/null && apt-get install -y gh >/dev/null); git config --global credential.helper "!f() { echo username=x-access-token; echo password=\$GH_TOKEN; }; f"; spawnd pr create infra-proof-20260609094105 --agent proof --title-prefix spawnd-proof'
+```
+
+Result:
+
+```text
+https://github.com/fntune/spawnd/pull/7
+```
+
+Verification:
+
+```text
+remote branch: refs/heads/spawnd/infra-proof-20260609094105/proof
+remote sha: a5919e73283220314a9a4a8e5d25c58540d396f2
+pr_url: https://github.com/fntune/spawnd/pull/7
+pr_number: 7
+headRefName: spawnd/infra-proof-20260609094105/proof
+baseRefName: main
+state: OPEN
+```
 
 MinIO objects:
 
@@ -339,8 +366,8 @@ The active unattended goal is not complete. Remaining required proof:
 
 - Wire real provider credentials into worker runtime env or secret refs.
 - Run a real provider-backed contributor job, not `--mock`.
-- Wire GitHub credentials for branch push and PR creation.
-- Prove `spawnd pr create` creates a PR from pushed provenance.
+- Persist GitHub credentials or secret refs for unattended branch push and PR
+  creation; the proof used an explicit one-off `GH_TOKEN`.
 - Install real GitHub webhooks on the intended repositories.
 - Activate schedules only after provider and GitHub credentials are available.
 - Optional OTLP collector/export was not enabled; only the Postgres trace mirror

@@ -47,6 +47,14 @@ def _durable_plan_spec(plan: PlanSpec) -> dict[str, Any]:
     return spec
 
 
+def _pull_request_number(pr_url: str) -> int | None:
+    value = pr_url.rstrip('/').rsplit('/', 1)[-1]
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 class DeployedRepository:
     """Repository boundary for deployed Postgres state.
 
@@ -1876,6 +1884,16 @@ class DeployedRepository:
             if agent:
                 stmt = stmt.where(schema.git_provenance.c.agent == agent)
             return [dict(row) for row in conn.execute(stmt).mappings().all()]
+
+    def record_pull_request(self, run_id: str, agent: str | None, pr_url: str) -> None:
+        pr_number = _pull_request_number(pr_url)
+        with self.engine.begin() as conn:
+            stmt = update(schema.git_provenance).where(schema.git_provenance.c.run_id == run_id)
+            if agent:
+                stmt = stmt.where(schema.git_provenance.c.agent == agent)
+            else:
+                stmt = stmt.where(schema.git_provenance.c.agent.is_(None))
+            conn.execute(stmt.values(pr_url=pr_url, pr_number=pr_number))
 
     def telemetry_summary(self, run_id: str) -> dict[str, Any]:
         with self.engine.connect() as conn:
