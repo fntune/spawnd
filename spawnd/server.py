@@ -309,6 +309,8 @@ def create_app() -> FastAPI:
         payload = await request.json()
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail="GitHub payload must be a JSON object")
+        if event == "ping":
+            return {"status": "pong"}
         run_id = submit_template(
             template_id,
             parameters=_github_parameters(event, payload),

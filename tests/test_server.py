@@ -259,3 +259,26 @@ agents:
     assert run is not None
     assert run['source_repo'] == 'https://github.com/acme/app.git'
     assert run['source_ref'] == 'abc123'
+
+
+def test_github_webhook_ping_does_not_submit_run(monkeypatch):
+    repo = make_repo()
+    coordinator = InMemoryCoordinator()
+    monkeypatch.setattr(server, '_repository', lambda: repo)
+    monkeypatch.setattr(server, '_coordinator', lambda: coordinator)
+    monkeypatch.setenv('SPAWND_API_TOKEN', 'test-token')
+    monkeypatch.setenv('SPAWND_GITHUB_WEBHOOK_SECRET', 'webhook-secret')
+    client = TestClient(server.create_app())
+    payload = {'zen': 'test', 'repository': {'full_name': 'acme/app'}}
+    body = json.dumps(payload).encode('utf-8')
+    signature = 'sha256=' + hmac.new(b'webhook-secret', body, hashlib.sha256).hexdigest()
+
+    response = client.post(
+        '/webhooks/github/github-contributor',
+        content=body,
+        headers={'X-GitHub-Event': 'ping', 'X-Hub-Signature-256': signature, 'Content-Type': 'application/json'},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {'status': 'pong'}
+    assert repo.list_runs() == []

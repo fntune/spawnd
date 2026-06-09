@@ -137,7 +137,9 @@ Authorization: Bearer $SPAWND_API_TOKEN
 ```
 
 GitHub webhooks use `X-Hub-Signature-256` and
-`SPAWND_GITHUB_WEBHOOK_SECRET`.
+`SPAWND_GITHUB_WEBHOOK_SECRET`. GitHub `ping` events return
+`{"status":"pong"}` and do not submit runs, so hook creation can be verified
+without starting contributor work.
 
 After the API has a durable public HTTPS URL, install repository webhooks:
 

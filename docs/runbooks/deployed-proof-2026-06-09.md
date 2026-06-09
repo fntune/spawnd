@@ -533,6 +533,8 @@ Webhook receiver proof:
 - signed GitHub-style webhook created `github-contributor-4abd61b3`
 - run was cancelled through the API:
   `POST /runs/github-contributor-4abd61b3/cancel`
+- GitHub `ping` events return `{"status":"pong"}` and do not submit runs, so
+  hook creation checks do not start contributor work.
 
 Result:
 

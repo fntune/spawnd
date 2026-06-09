@@ -359,7 +359,8 @@ fields.
 
 All HTTP routes except health, readiness, metrics, and GitHub webhooks require
 `Authorization: Bearer $SPAWND_API_TOKEN`. GitHub webhooks verify
-`X-Hub-Signature-256` against `SPAWND_GITHUB_WEBHOOK_SECRET`.
+`X-Hub-Signature-256` against `SPAWND_GITHUB_WEBHOOK_SECRET`. GitHub `ping`
+events return `{"status":"pong"}` and do not submit runs.
 
 Install repository webhooks with a durable public API base URL:
 
