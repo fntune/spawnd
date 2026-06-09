@@ -1,8 +1,10 @@
 # Deployed Proof Run - 2026-06-09
 
 This runbook records the deployed Spawnd proof performed against the local Docker
-stack on 2026-06-09. The stack used real Postgres, Redis, and MinIO. Runtime
-execution was mock-backed, so the full unattended goal is not complete yet.
+stack on 2026-06-09. The stack used real Postgres, Redis, and MinIO. It includes
+both an initial mock runtime proof and a later real Codex-backed contributor run.
+The full unattended goal is still not complete because persistent provider/GitHub
+secret wiring, real GitHub webhook installation, and OTLP export remain open.
 
 ## Environment
 
@@ -39,13 +41,18 @@ Worker git identity for local proof commits:
 - `GIT_COMMITTER_NAME=spawnd`
 - `GIT_COMMITTER_EMAIL=spawnd@example.invalid`
 
-Provider and GitHub credentials were not present:
+Provider and GitHub environment variables were not present in the compose stack:
 
 - `OPENAI_API_KEY` unset
 - `ANTHROPIC_API_KEY` unset
 - `CLAUDE_API_KEY` unset
 - `GITHUB_TOKEN` unset
 - `GH_TOKEN` unset
+
+The real Codex contributor proof used a one-shot worker with host Codex auth
+mounted into `/root/.codex` and a one-off `GH_TOKEN` injected from `gh auth
+token`. That proves the runtime and PR path, but it is not persistent unattended
+secret wiring.
 
 ## Infrastructure Commands
 
@@ -198,6 +205,129 @@ Artifact contents checked:
 - final message: `Fake runtime completed proof`
 - patch artifact adds `spawnd-proof.txt` containing `proof`
 
+## Real Codex Contributor Proof
+
+Two failed attempts preceded the successful contributor run:
+
+- `real-contributor-20260609044107` reached Codex but failed because
+  `gpt-5.1-codex-mini` is not supported for this ChatGPT-authenticated Codex
+  account.
+- `real-contributor-20260609044155` completed with real token/cost usage but
+  made no repository change because Codex SDK `workspace-write` sandboxing failed
+  inside the container with a namespace/bwrap error.
+
+The successful run used container isolation plus Codex SDK `danger-full-access`
+inside the container. This was bounded by the worker container, runtime timeout,
+check timeout, cost cap, and explicit command policy for setup/check commands.
+
+Run id:
+
+```text
+real-contributor-20260609044421
+```
+
+Submission source:
+
+- `source_repo=https://github.com/fntune/spawnd.git`
+- `source_ref=origin/main`
+- submitted through HTTP API
+- runtime: Codex SDK with mounted host Codex auth
+- worker id: `real-codex-worker-3`
+- worker command shape:
+  `docker compose run --rm -v /Users/sour4bh/.codex:/root/.codex -e GH_TOKEN="$(gh auth token)" worker ... spawnd worker --once --worker-id real-codex-worker-3`
+
+Plan shape:
+
+- setup command: `python -m compileall -q spawnd`
+- check command: `python -m compileall -q spawnd`
+- git commit enabled
+- git push enabled
+- artifact raw capture disabled
+- telemetry exporter disabled; local trace mirror still recorded spans
+- Codex config: `engine=sdk`, `sandbox=danger-full-access`,
+  `approval_mode=deny_all`, `ephemeral=true`
+
+Worker result:
+
+```text
+Worker real-codex-worker-3 finished real-contributor-20260609044421/contributor: completed
+```
+
+Postgres counts:
+
+```text
+run_id                           agents attempts events checks traces artifacts provenance
+real-contributor-20260609044421       1        1      9      1     12         5          1
+```
+
+Usage:
+
+```text
+provider=openai
+input_tokens=429994
+output_tokens=7675
+amount_usd=2.2650949999999996
+source=estimated
+```
+
+Git provenance:
+
+- base/head source commit: `d66dfa31b5e622a8cf5319748e2264d12b7af85b`
+- contributor commit: `de5a4232c77212d6a9bcf1d2af43dad48c2c10fc`
+- branch: `spawnd/real-contributor-20260609044421/contributor`
+- changed files: `2`
+- insertions: `100`
+- deletions: `0`
+- patch artifact id: `a3273c46467a4ea7b5509b2d210883a9`
+
+Changed files:
+
+- `README.md`
+- `docs/deployment.md`
+
+Final message:
+
+```text
+Implemented a narrow docs-only operations improvement.
+
+Changed files:
+- README.md: adds a pointer to the real Codex contributor deployment recipe.
+- docs/deployment.md: adds a Real Codex Contributor Job section covering Codex auth mount, GitHub token handling, git askpass, plan env_refs, worker execution, and PR creation.
+
+Verification:
+- git diff --check README.md docs/deployment.md passed.
+```
+
+Check proof:
+
+```text
+command: python -m compileall -q spawnd
+exit_code: 0
+duration_ms: 18
+```
+
+MinIO objects:
+
+```text
+dev/runs/real-contributor-20260609044421/contributor/setup-output-8eb86c195c01462e9f38f95f578cb0ea.txt
+dev/runs/real-contributor-20260609044421/contributor/runtime-output-1cfda614349a4802b283d04a100b604e.txt
+dev/runs/real-contributor-20260609044421/contributor/final-message-86161cb45e764a61889dce5b201118b7.txt
+dev/runs/real-contributor-20260609044421/contributor/check-output-0ceabb8c98b4480fa28202b07cd60d12.txt
+dev/runs/real-contributor-20260609044421/contributor/patch-5e41bb8117df4f1c970a3de9d89ef3b2.txt
+```
+
+PR proof:
+
+```text
+remote branch: refs/heads/spawnd/real-contributor-20260609044421/contributor
+remote sha: de5a4232c77212d6a9bcf1d2af43dad48c2c10fc
+pr_url: https://github.com/fntune/spawnd/pull/8
+pr_number: 8
+headRefName: spawnd/real-contributor-20260609044421/contributor
+baseRefName: main
+state: OPEN
+```
+
 ## Redis Loss Recovery
 
 Status reconstruction after Redis flush:
@@ -233,6 +363,16 @@ Result:
 
 This proves Redis can lose coordination keys without taking down the deployed
 control-plane processes. Postgres remains the reconstructable state store.
+
+Status reconstruction after Redis flush was also verified for the real Codex
+run:
+
+```text
+real-contributor-20260609044421 completed 2.2650949999999996
+contributor completed spawnd/real-contributor-20260609044421/contributor 429994 7675
+attempts 1
+trace_span_count 12
+```
 
 ## Retry Proof
 
@@ -364,15 +504,17 @@ Result: passed.
 
 The active unattended goal is not complete. Remaining required proof:
 
-- Wire real provider credentials into worker runtime env or secret refs.
-- Run a real provider-backed contributor job, not `--mock`.
 - Persist GitHub credentials or secret refs for unattended branch push and PR
-  creation; the proof used an explicit one-off `GH_TOKEN`.
+  creation. The real run proof used mounted Codex auth and an explicit one-off
+  `GH_TOKEN`.
+- Persist provider credentials or Codex auth mounts for unattended worker
+  services rather than one-shot proof containers.
 - Install real GitHub webhooks on the intended repositories.
-- Activate schedules only after provider and GitHub credentials are available.
+- Activate schedules only after persistent provider and GitHub credentials are
+  available.
 - Optional OTLP collector/export was not enabled; only the Postgres trace mirror
   was proven.
-- Validate the intended real runtime path in the worker image. The OpenAI Python
-  package, OpenAI Codex Python package, and `claude-agent-sdk` are present;
-  Anthropic Python package is not present, and no `codex` binary is currently on
-  the worker `PATH`.
+- The worker image has OpenAI Python, OpenAI Codex Python, and
+  `claude-agent-sdk`; Anthropic Python package is not present, and no `codex`
+  binary is currently on the worker `PATH`. The successful real run used Codex
+  SDK, not Codex CLI.
