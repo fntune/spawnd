@@ -375,6 +375,18 @@ spawnd github-webhooks install \
   --repo fntune/cashgrep
 ```
 
+Verify installed hooks with the same repo list:
+
+```bash
+spawnd github-webhooks verify \
+  --base-url https://spawnd.example.com \
+  --repo fntune/subport \
+  --repo fntune/stockbay \
+  --repo fntune/fn \
+  --repo fntune/biomon \
+  --repo fntune/cashgrep
+```
+
 Reusable templates and schedules are durable Postgres records:
 
 ```bash

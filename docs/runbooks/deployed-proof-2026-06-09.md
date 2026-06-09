@@ -612,6 +612,31 @@ Result:
 Error: webhook base URL must use https
 ```
 
+Webhook verification command added and verified against the current missing
+state:
+
+```bash
+python -m spawnd.cli github-webhooks verify \
+  --base-url https://spawnd.example.com \
+  --repo fntune/subport \
+  --repo fntune/stockbay \
+  --repo fntune/fn \
+  --repo fntune/biomon \
+  --repo fntune/cashgrep \
+  --json
+```
+
+Result:
+
+```text
+fntune/subport    missing
+fntune/stockbay   missing
+fntune/fn         missing
+fntune/biomon     missing
+fntune/cashgrep   missing
+Error: GitHub webhook verification failed
+```
+
 ## OTLP Collector Proof
 
 The local compose stack was extended with

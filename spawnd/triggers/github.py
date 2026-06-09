@@ -22,6 +22,22 @@ class WebhookTarget:
     url: str
 
 
+@dataclass(frozen=True)
+class WebhookVerification:
+    """Verification result for one repository webhook."""
+
+    repo: str
+    hook_id: int | None
+    url: str
+    active: bool
+    events: tuple[str, ...]
+    issues: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return not self.issues
+
+
 def webhook_url(base_url: str, template_id: str) -> str:
     """Build the deployed GitHub webhook URL for a template."""
 
@@ -90,6 +106,54 @@ def install_webhooks(
             )
             hook_id = _hook_id(response)
         results.append(WebhookTarget(repo=repo, hook_id=hook_id, action=action, url=hook_url))
+    return results
+
+
+def verify_webhooks(
+    repos: list[str],
+    *,
+    base_url: str,
+    template_id: str,
+    events: list[str] | None = None,
+    runner: Runner = subprocess.run,
+) -> list[WebhookVerification]:
+    """Verify GitHub repository webhooks for a deployed template."""
+
+    hook_url = webhook_url(base_url, template_id)
+    expected_events = set(events or ['push', 'pull_request'])
+    results: list[WebhookVerification] = []
+    for repo in repos:
+        _validate_repo(repo)
+        hook = _matching_hook(repo, hook_url, runner=runner)
+        if not hook:
+            results.append(
+                WebhookVerification(
+                    repo=repo,
+                    hook_id=None,
+                    url=hook_url,
+                    active=False,
+                    events=(),
+                    issues=('missing',),
+                )
+            )
+            continue
+        actual_events = tuple(str(event) for event in hook.get('events') or ())
+        issues: list[str] = []
+        if not hook.get('active'):
+            issues.append('inactive')
+        missing_events = expected_events - set(actual_events)
+        if missing_events:
+            issues.append('missing_events:' + ','.join(sorted(missing_events)))
+        results.append(
+            WebhookVerification(
+                repo=repo,
+                hook_id=_hook_id(hook),
+                url=hook_url,
+                active=bool(hook.get('active')),
+                events=actual_events,
+                issues=tuple(issues),
+            )
+        )
     return results
 
 

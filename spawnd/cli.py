@@ -23,7 +23,7 @@ from spawnd.observability.telemetry import TelemetryRecorder
 from spawnd.roles import BUILTIN_ROLES, get_role
 from spawnd.state.repository import DeployedRepository
 from spawnd.state.submission import consume_next_submission, enqueue_submission, submit_due_schedules, submit_plan, submit_template, worker_id as make_worker_id
-from spawnd.triggers.github import install_webhooks
+from spawnd.triggers.github import install_webhooks, verify_webhooks
 from spawnd.workers.worker import DeployedWorker, drain_queue_outbox, reconcile_ready_agents
 
 
@@ -595,6 +595,43 @@ def github_webhooks_install(
     for row in rows:
         hook = f" hook={row['hook_id']}" if row['hook_id'] is not None else ""
         click.echo(f"{label} {row['repo']}: {row['action']}{hook} {row['url']}")
+
+
+@github_webhooks.command("verify")
+@click.option("--base-url", required=True, help="Durable public API base URL, for example https://spawnd.example.com")
+@click.option("--template-id", default="github-contributor", show_default=True)
+@click.option("--repo", "repos", multiple=True, required=True, help="GitHub repo as owner/name")
+@click.option("--event", "events", multiple=True, default=("push", "pull_request"), show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+def github_webhooks_verify(base_url: str, template_id: str, repos: tuple[str, ...], events: tuple[str, ...], as_json: bool) -> None:
+    """Verify active GitHub webhooks for deployed trigger ingress."""
+
+    try:
+        results = verify_webhooks(list(repos), base_url=base_url, template_id=template_id, events=list(events))
+    except (RuntimeError, ValueError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    rows = [
+        {
+            'repo': item.repo,
+            'ok': item.ok,
+            'hook_id': item.hook_id,
+            'active': item.active,
+            'events': item.events,
+            'issues': item.issues,
+            'url': item.url,
+        }
+        for item in results
+    ]
+    if as_json:
+        _json_echo(rows)
+    else:
+        for row in rows:
+            status = 'ok' if row['ok'] else 'failed'
+            issues = ','.join(row['issues']) if row['issues'] else '-'
+            hook = f" hook={row['hook_id']}" if row['hook_id'] is not None else ""
+            click.echo(f"{row['repo']}: {status}{hook} issues={issues} {row['url']}")
+    if any(not item.ok for item in results):
+        raise click.ClickException("GitHub webhook verification failed")
 
 
 @main.group()

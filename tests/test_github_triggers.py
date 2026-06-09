@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from spawnd.triggers.github import install_webhooks, webhook_url
+from spawnd.triggers.github import install_webhooks, verify_webhooks, webhook_url
 
 
 def test_webhook_url_rejects_non_public_targets():
@@ -74,3 +74,45 @@ def test_install_webhooks_dry_run_does_not_write():
     )
 
     assert [(item.repo, item.action, item.hook_id) for item in results] == [('acme/app', 'create', None)]
+
+
+def test_verify_webhooks_reports_missing_and_misconfigured_hooks():
+    base_url = 'https://spawnd.example.com'
+    target_url = f'{base_url}/webhooks/github/github-contributor'
+
+    def runner(args, *, input, capture_output, text, check):
+        _ = input
+        _ = capture_output
+        _ = text
+        _ = check
+        endpoint = args[2]
+        if endpoint == 'repos/acme/missing/hooks':
+            return subprocess.CompletedProcess(args, 0, '[]', '')
+        if endpoint == 'repos/acme/inactive/hooks':
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps([{'id': 21, 'active': False, 'events': ['push'], 'config': {'url': target_url}}]),
+                '',
+            )
+        if endpoint == 'repos/acme/ok/hooks':
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps([{'id': 22, 'active': True, 'events': ['push', 'pull_request'], 'config': {'url': target_url}}]),
+                '',
+            )
+        raise AssertionError(args)
+
+    results = verify_webhooks(
+        ['acme/missing', 'acme/inactive', 'acme/ok'],
+        base_url=base_url,
+        template_id='github-contributor',
+        runner=runner,
+    )
+
+    assert [(item.repo, item.ok, item.hook_id, item.issues) for item in results] == [
+        ('acme/missing', False, None, ('missing',)),
+        ('acme/inactive', False, 21, ('inactive', 'missing_events:pull_request')),
+        ('acme/ok', True, 22, ()),
+    ]

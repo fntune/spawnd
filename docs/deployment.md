@@ -158,6 +158,18 @@ Use `--dry-run` first to validate the URL and show whether each repo would be
 created or updated. The installer rejects localhost and non-HTTPS callback
 targets.
 
+Verify installed hooks with the same target:
+
+```bash
+spawnd github-webhooks verify \
+  --base-url https://spawnd.example.com \
+  --repo fntune/subport \
+  --repo fntune/stockbay \
+  --repo fntune/fn \
+  --repo fntune/biomon \
+  --repo fntune/cashgrep
+```
+
 ## Local Deployed Stack
 
 Start Postgres, Redis, MinIO, API, and one worker:
