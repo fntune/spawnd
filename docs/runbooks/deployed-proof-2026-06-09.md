@@ -550,6 +550,27 @@ but this local API has no durable public callback URL. `ngrok` has no configured
 local config file and `cloudflared tunnel list` has no origin certificate, so an
 ephemeral tunnel would not satisfy unattended operation.
 
+Latest durable callback recheck:
+
+```bash
+env | cut -d= -f1 | rg -i 'SPAWND|PUBLIC|WEBHOOK|NGROK|CLOUDFLARE|CLOUD|TUNNEL|VERCEL|DEPLOY|DOMAIN|URL'
+ngrok config check
+cloudflared tunnel list
+vercel whoami
+vercel env ls
+find . -maxdepth 4 \( -name 'vercel.json' -o -name '.vercel' -o -name 'fly.toml' -o -name 'railway.toml' -o -name 'render.yaml' -o -name 'Procfile' -o -name 'cloudflared*.yml' -o -name 'ngrok.yml' \) -print
+```
+
+Result:
+
+```text
+no public callback env vars found
+ngrok config missing: /Users/sour4bh/Library/Application Support/ngrok/ngrok.yml
+cloudflared origin cert missing
+vercel authenticated as sour4bh, but this repo is not linked to a Vercel project
+no deploy/tunnel config files found in this repo
+```
+
 Webhook installation command added and verified in dry-run mode:
 
 ```bash
