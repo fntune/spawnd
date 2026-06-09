@@ -108,10 +108,17 @@ services:
       GIT_AUTHOR_EMAIL: spawnd@example.invalid
       GIT_COMMITTER_NAME: spawnd
       GIT_COMMITTER_EMAIL: spawnd@example.invalid
+      GIT_TERMINAL_PROMPT: "0"
+      SPAWND_GIT_ASKPASS: /usr/local/bin/spawnd-git-askpass
+      GIT_ASKPASS: /usr/local/bin/spawnd-git-askpass
+      SPAWND_GITHUB_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
+      GITHUB_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
+      GH_TOKEN: ${SPAWND_GITHUB_TOKEN:-}
       AWS_ACCESS_KEY_ID: spawnd
       AWS_SECRET_ACCESS_KEY: spawnd-secret
     volumes:
       - spawnd-scratch:/scratch
+      - ${SPAWND_CODEX_AUTH_DIR:-${HOME}/.codex}:/root/.codex:ro
     command: spawnd worker --poll --worker-id compose-worker-1
 
   submitter:

@@ -39,6 +39,20 @@ Provider and git credentials should be supplied as worker environment variables
 and referenced from plans with `agent.env_refs`. Do not put raw provider keys,
 git tokens, or `.env` contents into plan YAML.
 
+The compose worker exposes the stable secret-reference names used by deployed
+plans:
+
+- `SPAWND_CODEX_AUTH_DIR` mounts Codex auth into `/root/.codex`.
+- `SPAWND_GITHUB_TOKEN` is available to git as `SPAWND_GITHUB_TOKEN`,
+  `GITHUB_TOKEN`, and `GH_TOKEN`.
+- `SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` points git HTTPS
+  auth at the committed non-secret askpass helper.
+
+For local compose runs, copy `.env.example` to `.env`, set
+`SPAWND_CODEX_AUTH_DIR` and `SPAWND_GITHUB_TOKEN`, and keep `.env` untracked.
+The helper prints only the token value already present in the worker
+environment; it never stores credentials.
+
 Write-capable provider runtimes must run inside an explicit worker isolation
 boundary. Set `SPAWND_RUNTIME_ISOLATION=container`, `jail`, or `vm` only on
 workers actually running in that boundary. Without it, workers fail mutable real
@@ -122,3 +136,11 @@ The compose stack exposes:
 - MinIO console: `http://localhost:9001`
 
 The dev API token is `dev-token`.
+
+The dev worker reads optional persistent credentials from `.env`:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+docker compose up -d worker
+```

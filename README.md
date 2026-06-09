@@ -127,6 +127,9 @@ Git clone/fetch/push credentials should be provided through explicit
 `env_refs` on `orchestration.worktree_source` or `orchestration.git`. The plan
 stores only the reference names; workers resolve actual secret values from their
 environment at runtime.
+The compose worker exposes `SPAWND_GITHUB_TOKEN` and
+`SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` for this purpose, and
+can mount Codex auth from `SPAWND_CODEX_AUTH_DIR` into `/root/.codex`.
 
 Plan-provided setup and check commands are constrained by
 `orchestration.command_policy`. The default allowlist permits common test and

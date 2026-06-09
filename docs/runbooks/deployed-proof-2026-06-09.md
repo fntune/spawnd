@@ -41,7 +41,8 @@ Worker git identity for local proof commits:
 - `GIT_COMMITTER_NAME=spawnd`
 - `GIT_COMMITTER_EMAIL=spawnd@example.invalid`
 
-Provider and GitHub environment variables were not present in the compose stack:
+Before the follow-up persistent wiring, provider and GitHub environment
+variables were not present in the compose stack:
 
 - `OPENAI_API_KEY` unset
 - `ANTHROPIC_API_KEY` unset
@@ -53,6 +54,50 @@ The real Codex contributor proof used a one-shot worker with host Codex auth
 mounted into `/root/.codex` and a one-off `GH_TOKEN` injected from `gh auth
 token`. That proves the runtime and PR path, but it is not persistent unattended
 secret wiring.
+
+Follow-up persistent wiring added after the proof:
+
+- `docker/git-askpass.sh` is a committed non-secret helper for git HTTPS auth.
+- the worker image includes `gh` plus `/usr/local/bin/spawnd-git-askpass`.
+- compose worker env exposes `SPAWND_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`,
+  `SPAWND_GIT_ASKPASS`, and `GIT_ASKPASS`.
+- compose worker mounts `${SPAWND_CODEX_AUTH_DIR:-${HOME}/.codex}` into
+  `/root/.codex:ro`.
+- `.env.example` documents the local secret names while `.env` remains ignored.
+
+Persistent wiring verification after recreating the worker from `.env`:
+
+```bash
+umask 077
+# write SPAWND_CODEX_AUTH_DIR and SPAWND_GITHUB_TOKEN into ignored .env
+docker compose up -d --force-recreate worker
+docker compose exec -T worker sh -lc '
+test -r /root/.codex/auth.json
+command -v gh
+gh --version | head -1
+command -v spawnd-git-askpass
+test "$SPAWND_GIT_ASKPASS" = /usr/local/bin/spawnd-git-askpass
+test "$GIT_ASKPASS" = /usr/local/bin/spawnd-git-askpass
+test -n "$SPAWND_GITHUB_TOKEN"
+test -n "$GH_TOKEN"
+printf "codex_auth=readable\n"
+printf "github_token=set\n"
+printf "askpass=%s\n" "$SPAWND_GIT_ASKPASS"
+'
+docker compose exec -T worker sh -lc 'gh api user --jq .login'
+```
+
+Result:
+
+```text
+/usr/bin/gh
+gh version 2.46.0 (2025-01-13 Debian 2.46.0-3)
+/usr/local/bin/spawnd-git-askpass
+codex_auth=readable
+github_token=set
+askpass=/usr/local/bin/spawnd-git-askpass
+sour4bh
+```
 
 ## Infrastructure Commands
 
@@ -507,15 +552,10 @@ Result: passed.
 
 The active unattended goal is not complete. Remaining required proof:
 
-- Persist GitHub credentials or secret refs for unattended branch push and PR
-  creation. The real run proof used mounted Codex auth and an explicit one-off
-  `GH_TOKEN`.
-- Persist provider credentials or Codex auth mounts for unattended worker
-  services rather than one-shot proof containers.
 - Install real GitHub webhooks on the intended repositories after a durable
   public API callback URL is available.
-- Activate schedules only after persistent provider and GitHub credentials are
-  available.
+- Activate schedules if the intended repos should start recurring contributor
+  runs from this local stack.
 - Optional OTLP collector/export was not enabled; only the Postgres trace mirror
   was proven.
 - The worker image has OpenAI Python, OpenAI Codex Python, and

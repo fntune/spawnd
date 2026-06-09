@@ -5,11 +5,13 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git build-essential \
+    && apt-get install -y --no-install-recommends ca-certificates curl git gh build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md alembic.ini /app/
 COPY spawnd /app/spawnd
+COPY docker/git-askpass.sh /usr/local/bin/spawnd-git-askpass
+RUN chmod 0755 /usr/local/bin/spawnd-git-askpass
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir ".[deployed,telemetry,openai,codex,sdk]"
