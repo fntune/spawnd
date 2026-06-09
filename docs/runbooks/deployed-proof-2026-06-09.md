@@ -212,8 +212,20 @@ Git provenance:
 PR proof:
 
 ```bash
-docker compose run --rm -e GH_TOKEN="$(gh auth token)" -e DEBIAN_FRONTEND=noninteractive worker sh -lc \
-  'set -e; command -v gh || (apt-get update >/dev/null && apt-get install -y gh >/dev/null); git config --global credential.helper "!f() { echo username=x-access-token; echo password=\$GH_TOKEN; }; f"; spawnd pr create infra-proof-20260609094105 --agent proof --title-prefix spawnd-proof'
+docker compose run --rm \
+  -e GH_TOKEN="$(gh auth token)" \
+  -e DEBIAN_FRONTEND=noninteractive \
+  worker sh -lc '
+    set -e
+    command -v gh >/dev/null || {
+      apt-get update >/dev/null
+      apt-get install -y gh >/dev/null
+    }
+    git config --global credential.helper "!f() { echo username=x-access-token; echo password=\$GH_TOKEN; }; f"
+    spawnd pr create infra-proof-20260609094105 \
+      --agent proof \
+      --title-prefix spawnd-proof
+  '
 ```
 
 Result:
@@ -886,7 +898,13 @@ rsync -az --delete --exclude .git --exclude .env --exclude .venv \
   --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache \
   /Users/sour4bh/dev/spawnd/ micro-1:/home/ubuntu/spawnd/
 ssh micro-1 'cd /home/ubuntu/spawnd && SPAWND_PODMAN_SKIP_BUILD=1 deploy/podman/up.sh'
-ssh micro-1 'podman exec spawnd_worker_1 sh -lc '"'"'test -w /root/.codex && test -r /root/.codex/auth.json && codex --version'"'"''
+ssh micro-1 <<'SSH'
+podman exec spawnd_worker_1 sh -lc '
+  test -w /root/.codex
+  test -r /root/.codex/auth.json
+  codex --version
+'
+SSH
 ```
 
 Result:
@@ -986,7 +1004,15 @@ a9b06dd4698bf33ef3e1f345588da4e630c49ba0 refs/heads/spawnd/real-podman-contribut
 PR creation command:
 
 ```bash
-ssh micro-1 'podman exec spawnd_worker_1 sh -lc '"'"'export GH_TOKEN="$SPAWND_GITHUB_TOKEN"; spawnd pr create real-podman-contributor-20260609170708 --agent contributor --title-prefix spawnd-real-podman --timeout-seconds 120'"'"''
+ssh micro-1 <<'SSH'
+podman exec spawnd_worker_1 sh -lc '
+  export GH_TOKEN="$SPAWND_GITHUB_TOKEN"
+  spawnd pr create real-podman-contributor-20260609170708 \
+    --agent contributor \
+    --title-prefix spawnd-real-podman \
+    --timeout-seconds 120
+'
+SSH
 ```
 
 Result:
@@ -1095,7 +1121,7 @@ python -m compileall -q spawnd/cli.py spawnd/coordination/redis.py spawnd/worker
 
 Result: passed.
 
-## Remaining Work Before Goal Completion
+## Remaining Operational Choices
 
 The durable public callback blocker is closed on `micro-1`: Podman API is
 reachable through Tailscale Funnel and GitHub reports all five hooks active with
