@@ -21,6 +21,11 @@ released.
 - `spawnd github-webhooks install` for idempotent GitHub webhook create/update
   against durable public callback URLs.
 
+### Fixed
+
+- Redis queue-depth reporting now uses consumer-group backlog instead of stream
+  history, so acknowledged completed jobs no longer appear as queued work.
+
 ## 2026-06-08 - Unattended Readiness
 
 Commit: `68c5461 Close unattended readiness audit`

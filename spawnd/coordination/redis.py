@@ -90,7 +90,7 @@ class RedisCoordinator:
             self._ack_group(READY_STREAM, WORKER_GROUP, job.message_id)
 
     def queue_depth(self) -> int:
-        return int(self.redis.xlen(READY_STREAM))
+        return self._group_backlog(READY_STREAM, WORKER_GROUP)
 
     def enqueue_submission(self, payload: dict[str, Any]) -> None:
         self.redis.xadd(SUBMISSION_STREAM, {'payload': json.dumps(payload, sort_keys=True)})
@@ -109,7 +109,7 @@ class RedisCoordinator:
             self._ack_group(SUBMISSION_STREAM, SUBMITTER_GROUP, job.message_id)
 
     def submission_queue_depth(self) -> int:
-        return int(self.redis.xlen(SUBMISSION_STREAM))
+        return self._group_backlog(SUBMISSION_STREAM, SUBMITTER_GROUP)
 
     def set_lease(self, run_id: str, agent: str, lease_token: str, ttl_seconds: int) -> None:
         self.redis.set(_lease_key(run_id, agent), lease_token, ex=ttl_seconds)
@@ -165,6 +165,27 @@ class RedisCoordinator:
         except Exception as exc:
             if not _is_missing_group_error(exc):
                 raise
+
+    def _group_backlog(self, stream: str, group: str) -> int:
+        try:
+            groups = self.redis.xinfo_groups(stream)
+        except Exception:
+            return int(self.redis.xlen(stream))
+        for info in groups:
+            name = _decode_redis_value(info.get('name'))
+            if name != group:
+                continue
+            pending = int(info.get('pending') or 0)
+            if info.get('entries-read') is None:
+                return int(self.redis.xlen(stream))
+            lag = info.get('lag')
+            if lag is None:
+                return pending
+            lag_value = int(lag)
+            if lag_value < 0:
+                return pending
+            return pending + lag_value
+        return int(self.redis.xlen(stream))
 
 
 class InMemoryCoordinator:
@@ -257,3 +278,9 @@ def _cancel_key(run_id: str) -> str:
 def _is_missing_group_error(exc: Exception) -> bool:
     message = str(exc)
     return 'NOGROUP' in message or 'requires the key to exist' in message
+
+
+def _decode_redis_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    return value
