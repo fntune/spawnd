@@ -634,6 +634,3 @@ The active unattended goal is not complete. Remaining required proof:
 
 - Install real GitHub webhooks on the intended repositories after a durable
   public API callback URL is available.
-- The worker image has OpenAI Python, OpenAI Codex Python, `claude-agent-sdk`,
-  and the bundled `codex` CLI linked on `PATH`. The successful real run used
-  Codex SDK, not Codex CLI.
