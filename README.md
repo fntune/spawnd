@@ -133,8 +133,9 @@ stores only the reference names; workers resolve actual secret values from their
 environment at runtime.
 The container worker loads `SPAWND_GITHUB_TOKEN` from the ignored `.env` and uses
 `SPAWND_GIT_ASKPASS=/usr/local/bin/spawnd-git-askpass` for this purpose. It
-mounts Codex auth from the required `SPAWND_CODEX_AUTH_DIR` value into
-`/root/.codex`.
+seeds a writable worker Codex home volume from the required
+`SPAWND_CODEX_AUTH_DIR/auth.json`, then mounts that volume at `/root/.codex` so
+Codex can create its local state database without mutating the seed directory.
 
 On Podman hosts such as `micro-1`, start the deployed stack with:
 

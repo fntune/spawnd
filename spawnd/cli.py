@@ -833,7 +833,7 @@ def pr_create(run_id: str, agent_name: str | None, all_agents: bool, title_prefi
             push_branch(repo_path, branch_name, remote=remote, timeout_seconds=timeout_seconds)
         agent_label = row.get("agent") or "run"
         title = f"{title_prefix}: {run_id}/{agent_label}"
-        body = json.dumps({"run_id": run_id, "agent": agent_label, "provenance": row}, indent=2, default=str)
+        body = _format_pr_body(run_id, agent_label, row)
         result = subprocess.run(
             ["gh", "pr", "create", "--head", branch_name, "--title", title, "--body", body],
             cwd=repo_path,
@@ -862,6 +862,67 @@ def _provenance_repo_path(row: dict[str, Any]) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _format_pr_body(run_id: str, agent_label: str, provenance: dict[str, Any]) -> str:
+    branch = provenance.get("branch") or ""
+    commit = provenance.get("commit_sha") or provenance.get("head_sha") or ""
+    base_ref = provenance.get("base_ref") or ""
+    base_sha = provenance.get("base_sha") or provenance.get("merge_base_sha") or ""
+    patch_artifact_id = provenance.get("patch_artifact_id") or ""
+    changed_files = _display_count(provenance.get("changed_files_count"))
+    insertions = _display_count(provenance.get("insertions_count"))
+    deletions = _display_count(provenance.get("deletions_count"))
+    diff_stats = provenance.get("diff_stats") if isinstance(provenance.get("diff_stats"), dict) else {}
+    shortstat = diff_stats.get("committed_shortstat") or diff_stats.get("worktree_shortstat") or ""
+
+    lines = [
+        "## Summary",
+        "",
+        f"- Run: `{run_id}`",
+        f"- Agent: `{agent_label}`",
+    ]
+    if branch:
+        lines.append(f"- Branch: `{branch}`")
+    if commit:
+        lines.append(f"- Commit: `{commit}`")
+    if base_ref:
+        suffix = f" at `{base_sha}`" if base_sha else ""
+        lines.append(f"- Base: `{base_ref}`{suffix}")
+
+    lines.extend(
+        [
+            "",
+            "## Changes",
+            "",
+            f"- Files changed: {changed_files}",
+            f"- Insertions: {insertions}",
+            f"- Deletions: {deletions}",
+        ]
+    )
+    if shortstat:
+        lines.append(f"- Git diff: {shortstat}")
+
+    lines.extend(
+        [
+            "",
+            "## Verification",
+            "",
+            f"- Inspect deployed run state with `spawnd status {run_id}`.",
+            f"- Inspect checks with `spawnd checks {run_id}`.",
+            f"- Inspect provenance with `spawnd provenance {run_id} --agent {agent_label}`.",
+        ]
+    )
+    if patch_artifact_id:
+        lines.append(f"- Patch artifact: `{patch_artifact_id}`.")
+
+    return "\n".join(lines) + "\n"
+
+
+def _display_count(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    return str(value)
 
 
 @pr.command("merge")

@@ -16,6 +16,7 @@ containers=(
   spawnd_submitter_1
   spawnd_api_1
   spawnd_migrate_1
+  spawnd_codex-home-init_1
   spawnd_minio-init_1
   spawnd_minio_1
   spawnd_otel-collector_1
@@ -33,5 +34,6 @@ if [[ "$REMOVE_VOLUMES" = "1" ]]; then
   podman volume rm \
     "${PROJECT}_spawnd-postgres" \
     "${PROJECT}_spawnd-minio" \
-    "${PROJECT}_spawnd-scratch" >/dev/null 2>&1 || true
+    "${PROJECT}_spawnd-scratch" \
+    "${PROJECT}_spawnd-codex-home" >/dev/null 2>&1 || true
 fi

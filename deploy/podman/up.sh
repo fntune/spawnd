@@ -8,6 +8,7 @@ NETWORK="${PROJECT}_default"
 POSTGRES_VOLUME="${PROJECT}_spawnd-postgres"
 MINIO_VOLUME="${PROJECT}_spawnd-minio"
 SCRATCH_VOLUME="${PROJECT}_spawnd-scratch"
+CODEX_HOME_VOLUME="${PROJECT}_spawnd-codex-home"
 
 APP_IMAGE="${SPAWND_APP_IMAGE:-localhost/spawnd:latest}"
 ENV_FILE="${SPAWND_ENV_FILE:-$ROOT/.env}"
@@ -187,6 +188,24 @@ init_minio() {
     "mc alias set local http://minio:9000 spawnd spawnd-secret && mc mb --ignore-existing local/$ARTIFACTS_BUCKET"
 }
 
+seed_codex_home() {
+  remove_container spawnd_codex-home-init_1
+  run_podman run --rm --name spawnd_codex-home-init_1 \
+    -v "$CODEX_HOME_VOLUME:/codex-home" \
+    -v "$SPAWND_CODEX_AUTH_DIR:/codex-auth:ro" \
+    --entrypoint /bin/sh \
+    "$APP_IMAGE" -lc \
+    'set -eu
+     if [ ! -r /codex-auth/auth.json ]; then
+       echo "SPAWND_CODEX_AUTH_DIR must contain readable auth.json" >&2
+       exit 2
+     fi
+     mkdir -p /codex-home
+     cp -p /codex-auth/auth.json /codex-home/auth.json
+     chmod 700 /codex-home
+     chmod 600 /codex-home/auth.json || true'
+}
+
 run_migrations() {
   remove_container spawnd_migrate_1
   run_podman run --rm --name spawnd_migrate_1 \
@@ -231,7 +250,7 @@ start_processes() {
     "${ENV_FILE_ARGS[@]}" \
     "${worker_env[@]}" \
     -v "$SCRATCH_VOLUME:/scratch" \
-    -v "$SPAWND_CODEX_AUTH_DIR:/root/.codex:ro" \
+    -v "$CODEX_HOME_VOLUME:/root/.codex" \
     "$APP_IMAGE" spawnd worker --poll --worker-id "$WORKER_ID" >/dev/null
 
   wait_for api 60 curl -fsS http://127.0.0.1:8765/readyz
@@ -243,15 +262,18 @@ remove_container spawnd_scheduler_1
 remove_container spawnd_submitter_1
 remove_container spawnd_api_1
 remove_container spawnd_migrate_1
+remove_container spawnd_codex-home-init_1
 remove_container spawnd_minio-init_1
 
 ensure_network
 ensure_volume "$POSTGRES_VOLUME"
 ensure_volume "$MINIO_VOLUME"
 ensure_volume "$SCRATCH_VOLUME"
+ensure_volume "$CODEX_HOME_VOLUME"
 build_image
 start_infra
 init_minio
+seed_codex_home
 run_migrations
 start_processes
 
