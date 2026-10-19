@@ -126,6 +126,11 @@ spawnd workers
 spawnd reconcile
 ```
 
+Operator note: `spawnd workers` normally reports Redis consumer-group backlog for
+`queue_depth` and `submission_queue_depth`, not raw Redis stream history.
+Acknowledged stream entries may remain in Redis while backlog is zero.
+When consumer-group metadata is unavailable, the count falls back to stream length.
+
 The local compose stack also starts an OpenTelemetry collector for worker trace
 export:
 
